@@ -1,9 +1,20 @@
 from fastapi import FastAPI, Depends
-from app.db import get_db
+from app.db import get_db, create_tables
 from sqlalchemy.ext.asyncio.session import AsyncSession
+from contextlib import asynccontextmanager
 from sqlalchemy import text
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup logic
+    await create_tables()
+    print("Database tables created successfully!")
+
+    yield  # Application runs while inside this block
+
+    print("Application is shutting down...")
+
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 async def root():
