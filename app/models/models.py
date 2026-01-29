@@ -45,6 +45,15 @@ class PickTaskStatus(str, PyEnum):
 
 
 # Models
+class User(SQLModel, table=True):
+    __tablename__ = "users"
+
+    user_id: Optional[int] = Field(default=None, primary_key=True)
+    email: str = Field(max_length=255, unique=True, index=True)
+    hashed_password: str = Field(max_length=255)
+    created_at: datetime = Field(default_factory=utc_now, sa_column=Column(TIMESTAMP))
+
+
 class Product(SQLModel, table=True):
     __tablename__ = "products"
     
