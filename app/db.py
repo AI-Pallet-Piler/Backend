@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 
 # Import all models to register them with SQLModel.metadata
 from app.models import (
+    User,
     Product,
     Location,
     Inventory,

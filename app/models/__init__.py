@@ -6,6 +6,7 @@ from .models import (
     Rotation,
     PickTaskStatus,
     # Models
+    User,
     Product,
     Location,
     Inventory,
@@ -24,6 +25,7 @@ __all__ = [ # = what gets imported if someone writes 'from models import *'
     "PalletStatus",
     "Rotation",
     "PickTaskStatus",
+    "User",
     "Product",
     "Location",
     "Inventory",
