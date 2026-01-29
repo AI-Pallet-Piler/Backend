@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio.session import AsyncSession
 
 from app.api.v1.endpoints.auth import router as auth_router
 from app.api.v1.endpoints.products import router as products_router
+from app.api.v1.endpoints.users import router as users_router
 from app.db import create_tables, get_db
 
 
@@ -25,6 +26,7 @@ app = FastAPI(lifespan=lifespan)
 # Register API routers
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(products_router, prefix="/api/v1")
+app.include_router(users_router, prefix="/api/v1")
 
 
 @app.get("/")
