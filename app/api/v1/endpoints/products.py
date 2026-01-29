@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -6,6 +8,33 @@ from sqlmodel import select
 
 from app.db import get_db
 from app.models import Product
+from sqlmodel import SQLModel
+
+
+# Request body schema: no product_id, created_at, updated_at (set server-side)
+class ProductCreate(SQLModel):
+    sku: str
+    name: str
+    description: Optional[str] = None
+    length_cm: Decimal
+    width_cm: Decimal
+    height_cm: Decimal
+    weight_kg: Decimal
+    is_fragile: bool = False
+    is_liquid: bool = False
+    requires_upright: bool = False
+    max_stack_layers: int = 10
+    pick_frequency: int = 0
+    popularity_score: Decimal = Decimal("0")
+
+
+# Full update body: same as create (no product_id, created_at, updated_at)
+ProductUpdate = ProductCreate
+
+
+def _naive_utc_now() -> datetime:
+    """Naive UTC datetime for TIMESTAMP columns (asyncpg compatibility)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 router = APIRouter(prefix="/products", tags=["products"])
@@ -82,12 +111,15 @@ async def get_product(
     summary="Create a new product",
 )
 async def create_product(
-    product: Product,
+    payload: ProductCreate,
     db: AsyncSession = Depends(get_db),
 ) -> Product:
-    # Ensure we don't accidentally use a client-specified ID
-    product.product_id = None
-
+    now = _naive_utc_now()
+    product = Product(
+        **payload.model_dump(),
+        created_at=now,
+        updated_at=now,
+    )
     db.add(product)
     await db.commit()
     await db.refresh(product)
@@ -101,7 +133,7 @@ async def create_product(
 )
 async def update_product(
     product_id: int,
-    updated: Product,
+    payload: ProductUpdate,
     db: AsyncSession = Depends(get_db),
 ) -> Product:
     stmt = select(Product).where(Product.product_id == product_id)
@@ -114,7 +146,6 @@ async def update_product(
             detail="Product not found",
         )
 
-    # Overwrite all mutable fields (keep product_id)
     for field in [
         "sku",
         "name",
@@ -130,7 +161,8 @@ async def update_product(
         "pick_frequency",
         "popularity_score",
     ]:
-        setattr(existing, field, getattr(updated, field))
+        setattr(existing, field, getattr(payload, field))
+    existing.updated_at = _naive_utc_now()
 
     await db.commit()
     await db.refresh(existing)
