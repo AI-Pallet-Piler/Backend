@@ -1,8 +1,12 @@
-from fastapi import FastAPI, Depends
-from app.db import get_db, create_tables
-from sqlalchemy.ext.asyncio.session import AsyncSession
 from contextlib import asynccontextmanager
+
+from fastapi import Depends, FastAPI
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio.session import AsyncSession
+
+from app.api.v1.endpoints.products import router as products_router
+from app.db import create_tables, get_db
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -14,7 +18,12 @@ async def lifespan(app: FastAPI):
 
     print("Application is shutting down...")
 
+
 app = FastAPI(lifespan=lifespan)
+
+# Register API routers
+app.include_router(products_router, prefix="/api/v1")
+
 
 @app.get("/")
 async def root():
