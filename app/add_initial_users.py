@@ -12,7 +12,9 @@ async def add_initial_users():
         users = [
             User(
                 user_id=1,
+                name="Admin User",
                 email="admin@example.com",
+                badge_number="A1001",
                 hashed_password=hash_password("admin123"),
                 role="admin",
                 created_at=now,
@@ -21,7 +23,9 @@ async def add_initial_users():
             ),
             User(
                 user_id=2,
+                name="Manager User",
                 email="manager@example.com",
+                badge_number="M2002",
                 hashed_password=hash_password("manager123"),
                 role="manager",
                 created_at=now,
@@ -30,7 +34,9 @@ async def add_initial_users():
             ),
             User(
                 user_id=3,
+                name="Picker User",
                 email="picker@example.com",
+                badge_number="P3003",
                 hashed_password=hash_password("picker123"),
                 role="picker",
                 created_at=now,
