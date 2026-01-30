@@ -60,7 +60,9 @@ class User(SQLModel, table=True):
     __tablename__ = "users"
 
     user_id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(max_length=150)
     email: str = Field(max_length=255, unique=True, index=True)
+    badge_number: str = Field(max_length=50, unique=True, index=True)
     hashed_password: str = Field(max_length=255)
     role: UserRole = Field(default=UserRole.PICKER, sa_column=Column(Enum(UserRole)))
     created_at: datetime = Field(default_factory=_naive_utc_now, sa_column=Column(TIMESTAMP))
