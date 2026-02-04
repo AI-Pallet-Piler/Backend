@@ -8,11 +8,22 @@ from sqlalchemy import Enum, DECIMAL, TIMESTAMP, func
 
 
 # Helper function for UTC timestamp default
+def _naive_utc_now() -> datetime:
+    return datetime.now().replace(tzinfo=None)
+
+# Utility function for default UTC now (for Product, Order, Pallet, etc.)
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.utcnow()
 
 
 # Enums
+
+# User roles enum
+class UserRole(str, PyEnum):
+    ADMIN = "admin"
+    MANAGER = "manager"
+    PICKER = "picker"
+    
 class LocationType(str, PyEnum):
     PICKING = "picking"
     RESERVE = "reserve"
@@ -49,9 +60,14 @@ class User(SQLModel, table=True):
     __tablename__ = "users"
 
     user_id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(max_length=150)
     email: str = Field(max_length=255, unique=True, index=True)
+    badge_number: str = Field(max_length=50, unique=True, index=True)
     hashed_password: str = Field(max_length=255)
-    created_at: datetime = Field(default_factory=utc_now, sa_column=Column(TIMESTAMP))
+    role: UserRole = Field(default=UserRole.PICKER, sa_column=Column(Enum(UserRole)))
+    created_at: datetime = Field(default_factory=_naive_utc_now, sa_column=Column(TIMESTAMP))
+    updated_at: datetime = Field(default_factory=_naive_utc_now, sa_column=Column(TIMESTAMP))
+    last_login: Optional[datetime] = Field(default=None, sa_column=Column(TIMESTAMP))
 
 
 class Product(SQLModel, table=True):
