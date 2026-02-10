@@ -3,22 +3,20 @@ import json
 
 # --- 1. DATA STRUCTURE ---
 class Item:
-    def __init__(self, id, name, w, d, h, weight):
+    def __init__(self, id, name, w, d, h, weight, allow_tipping=True):
         self.id = id
         self.name = name
-        self.w = w
-        self.d = d
-        self.h = h
+        # We store original dimensions
+        self.dims = [w, d, h]
         self.weight = weight 
-        # Area is used for stability checks
-        self.area = w * d 
         self.volume = w * d * h
+        # Can this item be tipped over? (e.g. Fridge = False, Box = True)
+        self.allow_tipping = allow_tipping
 
 # --- 2. CORE SOLVER LOGIC ---
 def solve_single_pallet(items, pallet_w, pallet_d, pallet_h):
     """
-    Attempts to pack a list of items into ONE pallet.
-    Features: Rotation, Density Optimization, and Smart Stability (Light items can overhang).
+    Attempts to pack items with FULL 3D ROTATION (Spin + Tip).
     """
     model = cp_model.CpModel()
 
@@ -27,9 +25,19 @@ def solve_single_pallet(items, pallet_w, pallet_d, pallet_h):
     x = {}
     y = {}
     z = {}
-    rotation = {} # 0 = Original, 1 = Rotated 90 degrees
     
-    # Variable to track the highest point used (for density optimization)
+    # Orientation Variables:
+    # We need to decide which dimension is Vertical (H), and which are Horizontal (W, D)
+    # 0: Upright (H is H)
+    # 1: Tipped on Side (W is H)
+    # 2: Tipped on Front (D is H)
+    orientation = {} 
+    
+    # Spin Variable (Rotation on floor):
+    # False: Keep standard W/D
+    # True: Swap W/D
+    spin = {}
+
     max_z = model.NewIntVar(0, pallet_h, 'max_z')
 
     for i, item in enumerate(items):
@@ -37,41 +45,92 @@ def solve_single_pallet(items, pallet_w, pallet_d, pallet_h):
         x[i] = model.NewIntVar(0, pallet_w, f'x_{i}')
         y[i] = model.NewIntVar(0, pallet_d, f'y_{i}')
         z[i] = model.NewIntVar(0, pallet_h, f'z_{i}')
-        rotation[i] = model.NewBoolVar(f'rot_{i}')
+        
+        spin[i] = model.NewBoolVar(f'spin_{i}')
+        
+        # Define 3 booleans for the 3 tipping states
+        # We use a list [b0, b1, b2] where exactly one must be true
+        orientation[i] = [model.NewBoolVar(f'orient_{i}_{k}') for k in range(3)]
+        
+        # Constraint: Exactly one orientation must be selected
+        model.Add(sum(orientation[i]) == 1).OnlyEnforceIf(is_packed[i])
+        
+        # If tipping is disabled, force orientation[0] (Upright) to be true
+        if not item.allow_tipping:
+            model.Add(orientation[i][0] == 1)
 
     # --- Constraints ---
 
-    # A. Effective Dimensions & Boundaries
-    # We create variables for the "current" Width and Depth based on rotation
+    # A. Effective Dimensions (The Magic Part)
+    # We create variables for the ACTUAL shape of the box as it sits on the pallet
     current_w = {}
     current_d = {}
+    current_h = {}
+    current_area = {}
 
     for i, item in enumerate(items):
-        # Define dimension variables
-        current_w[i] = model.NewIntVar(0, max(item.w, item.d), f'cw_{i}')
-        current_d[i] = model.NewIntVar(0, max(item.w, item.d), f'cd_{i}')
+        w, d, h = item.dims
+        
+        # Create integer variables for the final dimensions
+        # The max dimension could be any of w, d, h
+        max_dim = max(w, d, h)
+        current_w[i] = model.NewIntVar(0, max_dim, f'cw_{i}')
+        current_d[i] = model.NewIntVar(0, max_dim, f'cd_{i}')
+        current_h[i] = model.NewIntVar(0, max_dim, f'ch_{i}')
+        
+        # Area is needed for stability logic. 
+        # Since W*D is quadratic, we pre-calculate the 3 possible base areas.
+        # Area 0 (Upright): w*d
+        # Area 1 (Side):    h*d
+        # Area 2 (Front):   w*h
+        areas = [w*d, h*d, w*h]
+        current_area[i] = model.NewIntVar(min(areas), max(areas), f'area_{i}')
 
-        # Link rotation to dimensions
-        # If rotation=0: w=item.w, d=item.d
-        model.Add(current_w[i] == item.w).OnlyEnforceIf(rotation[i].Not())
-        model.Add(current_d[i] == item.d).OnlyEnforceIf(rotation[i].Not())
-        # If rotation=1: w=item.d, d=item.w
-        model.Add(current_w[i] == item.d).OnlyEnforceIf(rotation[i])
-        model.Add(current_d[i] == item.w).OnlyEnforceIf(rotation[i])
+        # --- LOGIC MAPPING ---
+        # 1. HEIGHT MAPPING
+        # If Orient 0: H = h
+        model.Add(current_h[i] == h).OnlyEnforceIf(orientation[i][0])
+        # If Orient 1: H = w
+        model.Add(current_h[i] == w).OnlyEnforceIf(orientation[i][1])
+        # If Orient 2: H = d
+        model.Add(current_h[i] == d).OnlyEnforceIf(orientation[i][2])
 
-        # Boundary Constraints (Must fit inside pallet)
+        # 2. WIDTH / DEPTH MAPPING (With Spin)
+        # This is complex because we have 6 combinations.
+        # We simplify by defining "Base Dimensions" first, then swapping them if spin=True.
+        
+        # If Orient 0 (Upright): Base is w, d
+        model.Add(current_w[i] == w).OnlyEnforceIf([orientation[i][0], spin[i].Not()])
+        model.Add(current_d[i] == d).OnlyEnforceIf([orientation[i][0], spin[i].Not()])
+        model.Add(current_w[i] == d).OnlyEnforceIf([orientation[i][0], spin[i]]) # Spun
+        model.Add(current_d[i] == w).OnlyEnforceIf([orientation[i][0], spin[i]]) # Spun
+        model.Add(current_area[i] == w*d).OnlyEnforceIf(orientation[i][0])
+
+        # If Orient 1 (Side - W is vertical): Base is h, d
+        model.Add(current_w[i] == h).OnlyEnforceIf([orientation[i][1], spin[i].Not()])
+        model.Add(current_d[i] == d).OnlyEnforceIf([orientation[i][1], spin[i].Not()])
+        model.Add(current_w[i] == d).OnlyEnforceIf([orientation[i][1], spin[i]]) # Spun
+        model.Add(current_d[i] == h).OnlyEnforceIf([orientation[i][1], spin[i]]) # Spun
+        model.Add(current_area[i] == h*d).OnlyEnforceIf(orientation[i][1])
+
+        # If Orient 2 (Front - D is vertical): Base is w, h
+        model.Add(current_w[i] == w).OnlyEnforceIf([orientation[i][2], spin[i].Not()])
+        model.Add(current_d[i] == h).OnlyEnforceIf([orientation[i][2], spin[i].Not()])
+        model.Add(current_w[i] == h).OnlyEnforceIf([orientation[i][2], spin[i]]) # Spun
+        model.Add(current_d[i] == w).OnlyEnforceIf([orientation[i][2], spin[i]]) # Spun
+        model.Add(current_area[i] == w*h).OnlyEnforceIf(orientation[i][2])
+
+        # --- BOUNDARIES ---
         model.Add(x[i] + current_w[i] <= pallet_w).OnlyEnforceIf(is_packed[i])
         model.Add(y[i] + current_d[i] <= pallet_d).OnlyEnforceIf(is_packed[i])
-        model.Add(z[i] + item.h <= pallet_h).OnlyEnforceIf(is_packed[i])
+        model.Add(z[i] + current_h[i] <= pallet_h).OnlyEnforceIf(is_packed[i])
         
-        # Link max_z
-        model.Add(max_z >= z[i] + item.h).OnlyEnforceIf(is_packed[i])
+        model.Add(max_z >= z[i] + current_h[i]).OnlyEnforceIf(is_packed[i])
 
     # B. Pairwise Non-Overlap & Physics
     for i in range(len(items)):
         for j in range(i + 1, len(items)):
             
-            # Relative positions
             left = model.NewBoolVar(f'{i}_left_{j}')
             right = model.NewBoolVar(f'{i}_right_{j}')
             behind = model.NewBoolVar(f'{i}_behind_{j}')
@@ -79,8 +138,7 @@ def solve_single_pallet(items, pallet_w, pallet_d, pallet_h):
             below = model.NewBoolVar(f'{i}_below_{j}')
             above = model.NewBoolVar(f'{i}_above_{j}')
 
-            # We use the calculated current_w/current_d variables for collision
-            # To allow variable sizes in Add(), we map them to intermediate End variables
+            # Map coordinates to End variables for collision checking
             x_end_i = model.NewIntVar(0, pallet_w, f'xe_{i}')
             y_end_i = model.NewIntVar(0, pallet_d, f'ye_{i}')
             x_end_j = model.NewIntVar(0, pallet_w, f'xe_{j}')
@@ -91,51 +149,67 @@ def solve_single_pallet(items, pallet_w, pallet_d, pallet_h):
             model.Add(x_end_j == x[j] + current_w[j])
             model.Add(y_end_j == y[j] + current_d[j])
 
-            # Geometry Logic
+            # Geometry
             model.Add(x_end_i <= x[j]).OnlyEnforceIf(left)
             model.Add(x_end_j <= x[i]).OnlyEnforceIf(right)
             model.Add(y_end_i <= y[j]).OnlyEnforceIf(behind)
             model.Add(y_end_j <= y[i]).OnlyEnforceIf(front)
-            model.Add(z[i] + items[i].h <= z[j]).OnlyEnforceIf(below)
-            model.Add(z[j] + items[j].h <= z[i]).OnlyEnforceIf(above)
+            # Note: For Z, we use current_h, not item.h!
+            model.Add(z[i] + current_h[i] <= z[j]).OnlyEnforceIf(below)
+            model.Add(z[j] + current_h[j] <= z[i]).OnlyEnforceIf(above)
 
-            # Ensure they don't overlap
             model.AddBoolOr([left, right, behind, front, below, above]).OnlyEnforceIf([is_packed[i], is_packed[j]])
 
-            # --- SMART PHYSICS CONSTRAINTS ---
+            # --- SMART PHYSICS ---
 
-            # Rule 1: HEAVIEST ON BOTTOM (Strict)
-            # If Item I is heavier, it CANNOT be on top of J
+            # Rule 1: HEAVIEST ON BOTTOM
             if items[i].weight > items[j].weight:
                 model.Add(above == False)
             elif items[j].weight > items[i].weight:
                 model.Add(below == False)
 
-            # Rule 2: BIGGEST AREA ON BOTTOM (Relaxed)
-            # Prevent large items on top... UNLESS they are very light.
+            # Rule 2: BIGGEST AREA ON BOTTOM (Dynamic!)
+            # We now use 'current_area' because if we tip a box, its area changes!
+            # Since current_area is a variable, we can't use Python 'if'. 
+            # We must use Solver Constraints.
             
-            # If I is Bigger Area than J
-            if items[i].area > items[j].area * 1.2:
-                # Only forbid if I is heavy (> 60% of J's weight)
-                if items[i].weight > items[j].weight * 0.6: 
-                     model.Add(above == False)
+            # This is complex in CP-SAT (Variable > Variable condition).
+            # To keep performance high, we simplify: 
+            # We assume the "Smart Stability" rule only cares about significant size diffs.
+            # We skip adding constraints for similar-sized items to save computation.
+            # But for obvious ones (Plate vs Cube), we enforce it.
             
-            # If J is Bigger Area than I
-            elif items[j].area > items[i].area * 1.2:
-                if items[j].weight > items[i].weight * 0.6:
-                    model.Add(below == False)
+            # Since we can't iterate variables, we add a conditional enforcement:
+            # "If Area(I) > Area(J) * 1.2 AND Weight(I) is Heavy -> Forbidden Above"
+            
+            # IMPLEMENTATION:
+            # We define boolean: i_is_bigger
+            i_is_bigger = model.NewBoolVar(f'{i}_bigger_{j}')
+            model.Add(current_area[i] >= current_area[j] + 100).OnlyEnforceIf(i_is_bigger) # +100 as a buffer
+            model.Add(current_area[i] < current_area[j] + 100).OnlyEnforceIf(i_is_bigger.Not())
+            
+            # If I is Bigger, forbid it from being above (unless it's light)
+            if items[i].weight > items[j].weight * 0.6:
+                model.Add(above == False).OnlyEnforceIf(i_is_bigger)
+                
+            # Inverse for J
+            j_is_bigger = model.NewBoolVar(f'{j}_bigger_{i}')
+            model.Add(current_area[j] >= current_area[i] + 100).OnlyEnforceIf(j_is_bigger)
+            model.Add(current_area[j] < current_area[i] + 100).OnlyEnforceIf(j_is_bigger.Not())
+            
+            if items[j].weight > items[i].weight * 0.6:
+                model.Add(below == False).OnlyEnforceIf(j_is_bigger)
 
-    # --- 3. OBJECTIVE (Density) ---
+
+    # --- 3. OBJECTIVE ---
     volume_score = 0
     gravity_score = 0
     
     for i, item in enumerate(items):
-        # Reward packing items
         volume_score += (is_packed[i] * item.volume)
-        # Penalize height (Gravity)
         gravity_score += z[i]
     
-    # Formula: Maximize Volume - Minimize Peak Height - Minimize Total Height
+    # Maximize Volume, Minimize Max Z, Minimize Gravity
     model.Maximize(
         (volume_score * 100000) - (max_z * 1000) - gravity_score
     )
@@ -153,21 +227,18 @@ def solve_single_pallet(items, pallet_w, pallet_d, pallet_h):
     if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         for i, item in enumerate(items):
             if solver.BooleanValue(is_packed[i]):
-                # Resolve final dimensions
-                final_w = item.w if solver.Value(rotation[i]) == 0 else item.d
-                final_d = item.d if solver.Value(rotation[i]) == 0 else item.w
-                
                 packed_items_data.append({
                     "id": item.id,
                     "name": item.name,
                     "x": solver.Value(x[i]),
                     "y": solver.Value(y[i]),
                     "z": solver.Value(z[i]),
-                    "w": final_w, 
-                    "h": item.h, 
-                    "d": final_d, 
+                    "w": solver.Value(current_w[i]), 
+                    "h": solver.Value(current_h[i]), 
+                    "d": solver.Value(current_d[i]), 
                     "weight": item.weight,
-                    "rotated": bool(solver.Value(rotation[i]))
+                    # Helper for debugging visualization
+                    "tipped": not (solver.BooleanValue(orientation[i][0])) 
                 })
             else:
                 unpacked_indices.append(i)
@@ -182,7 +253,6 @@ def solve_multiple_pallets(items, pallet_w, pallet_d, pallet_h):
     all_pallets = []
     
     # Sort items: Heaviest + Largest Volume first
-    # This helps the solver find the "base" layer easier
     items.sort(key=lambda x: (x.weight, x.volume), reverse=True)
     
     remaining_items = items.copy()
@@ -206,7 +276,6 @@ def solve_multiple_pallets(items, pallet_w, pallet_d, pallet_h):
         
         print(f"  ✓ Pallet {pallet_number}: Packed {len(packed)} items.")
         
-        # Prepare next batch
         next_batch = [remaining_items[i] for i in unpacked_indices]
         remaining_items = next_batch
         
@@ -216,26 +285,26 @@ def solve_multiple_pallets(items, pallet_w, pallet_d, pallet_h):
 
 # --- 4. TEST EXECUTION ---
 if __name__ == "__main__":
-    # Test Data: A mix of Heavy bases, Light/Large tops, and fillers
     all_items = [
-        # Heavy Bases (Should be on bottom)
+        # Heavy Bases
         Item("Heavy1", "Heavy Base 1", 45, 45, 20, weight=98),
         Item("Heavy2", "Heavy Base 2", 45, 45, 20, weight=99),
         Item("Heavy3", "Heavy Base 3", 45, 45, 20, weight=101),
         Item("Heavy4", "Heavy Base 4", 45, 45, 20, weight=97),
 
-        # The Problem Item: Light but Huge (Should stack on top now)
+        # Light but Huge (Should stack on top)
         Item("Flat", "Flat Item", 60, 60, 5, weight=20),
+        
+        # TALL ITEM: 10x10x60. Should tip over to become 60x10x10 or 10x60x10
+        Item("Tall", "Tall Item", 10, 10, 60, weight=15),
         
         # Fillers
         Item("Anvil", "Heavy Anvil", 10, 10, 10, weight=50), 
         Item("Med1", "Normal Box", 20, 20, 20, weight=10),
-        Item("Med2", "Normal Box", 20, 20, 20, weight=10),
-        Item("Tall", "Tall Item", 10, 10, 60, weight=15),
     ]
 
     print("=" * 60)
-    print("SMART DENSITY BIN PACKING SOLVER")
+    print("ULTIMATE DENSITY BIN PACKING SOLVER")
     print("=" * 60)
 
     final_manifest = solve_multiple_pallets(all_items, 100, 100, 100)
