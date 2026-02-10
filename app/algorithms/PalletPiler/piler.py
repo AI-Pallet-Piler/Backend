@@ -1,6 +1,7 @@
 from ortools.sat.python import cp_model
 import json
 
+# --- 1. DATA STRUCTURE ---
 class Item:
     def __init__(self, id, name, w, d, h, weight):
         self.id = id
@@ -9,25 +10,26 @@ class Item:
         self.d = d
         self.h = h
         self.weight = weight 
-        # Calculate area for "Biggest on Bottom" logic (Width x Depth)
+        # Area is used for stability checks
         self.area = w * d 
         self.volume = w * d * h
 
+# --- 2. CORE SOLVER LOGIC ---
 def solve_single_pallet(items, pallet_w, pallet_d, pallet_h):
     """
     Attempts to pack a list of items into ONE pallet.
-    OPTIMIZED FOR DENSITY: Prioritizes packing volume, then minimizing total height.
+    Features: Rotation, Density Optimization, and Smart Stability (Light items can overhang).
     """
     model = cp_model.CpModel()
 
-    # --- 1. Variables ---
+    # --- Variables ---
     is_packed = {}
     x = {}
     y = {}
     z = {}
+    rotation = {} # 0 = Original, 1 = Rotated 90 degrees
     
-    # Variable to track the highest point used in the pallet
-    # Minimizing this forces the pallet to be "flat" and dense.
+    # Variable to track the highest point used (for density optimization)
     max_z = model.NewIntVar(0, pallet_h, 'max_z')
 
     for i, item in enumerate(items):
@@ -35,20 +37,37 @@ def solve_single_pallet(items, pallet_w, pallet_d, pallet_h):
         x[i] = model.NewIntVar(0, pallet_w, f'x_{i}')
         y[i] = model.NewIntVar(0, pallet_d, f'y_{i}')
         z[i] = model.NewIntVar(0, pallet_h, f'z_{i}')
+        rotation[i] = model.NewBoolVar(f'rot_{i}')
 
-    # --- 2. Constraints ---
+    # --- Constraints ---
 
-    # A. Boundary Constraints
+    # A. Effective Dimensions & Boundaries
+    # We create variables for the "current" Width and Depth based on rotation
+    current_w = {}
+    current_d = {}
+
     for i, item in enumerate(items):
-        model.Add(x[i] + item.w <= pallet_w).OnlyEnforceIf(is_packed[i])
-        model.Add(y[i] + item.d <= pallet_d).OnlyEnforceIf(is_packed[i])
+        # Define dimension variables
+        current_w[i] = model.NewIntVar(0, max(item.w, item.d), f'cw_{i}')
+        current_d[i] = model.NewIntVar(0, max(item.w, item.d), f'cd_{i}')
+
+        # Link rotation to dimensions
+        # If rotation=0: w=item.w, d=item.d
+        model.Add(current_w[i] == item.w).OnlyEnforceIf(rotation[i].Not())
+        model.Add(current_d[i] == item.d).OnlyEnforceIf(rotation[i].Not())
+        # If rotation=1: w=item.d, d=item.w
+        model.Add(current_w[i] == item.d).OnlyEnforceIf(rotation[i])
+        model.Add(current_d[i] == item.w).OnlyEnforceIf(rotation[i])
+
+        # Boundary Constraints (Must fit inside pallet)
+        model.Add(x[i] + current_w[i] <= pallet_w).OnlyEnforceIf(is_packed[i])
+        model.Add(y[i] + current_d[i] <= pallet_d).OnlyEnforceIf(is_packed[i])
         model.Add(z[i] + item.h <= pallet_h).OnlyEnforceIf(is_packed[i])
         
-        # Link max_z to the top of every packed item
-        # If item is packed, max_z must be >= z[i] + height
+        # Link max_z
         model.Add(max_z >= z[i] + item.h).OnlyEnforceIf(is_packed[i])
 
-    # B. Pairwise Non-Overlap & PHYSICS LOGIC
+    # B. Pairwise Non-Overlap & Physics
     for i in range(len(items)):
         for j in range(i + 1, len(items)):
             
@@ -60,74 +79,95 @@ def solve_single_pallet(items, pallet_w, pallet_d, pallet_h):
             below = model.NewBoolVar(f'{i}_below_{j}')
             above = model.NewBoolVar(f'{i}_above_{j}')
 
-            # Geometric definitions
-            model.Add(x[i] + items[i].w <= x[j]).OnlyEnforceIf(left)
-            model.Add(x[j] + items[j].w <= x[i]).OnlyEnforceIf(right)
-            model.Add(y[i] + items[i].d <= y[j]).OnlyEnforceIf(behind)
-            model.Add(y[j] + items[j].d <= y[i]).OnlyEnforceIf(front)
+            # We use the calculated current_w/current_d variables for collision
+            # To allow variable sizes in Add(), we map them to intermediate End variables
+            x_end_i = model.NewIntVar(0, pallet_w, f'xe_{i}')
+            y_end_i = model.NewIntVar(0, pallet_d, f'ye_{i}')
+            x_end_j = model.NewIntVar(0, pallet_w, f'xe_{j}')
+            y_end_j = model.NewIntVar(0, pallet_d, f'ye_{j}')
+
+            model.Add(x_end_i == x[i] + current_w[i])
+            model.Add(y_end_i == y[i] + current_d[i])
+            model.Add(x_end_j == x[j] + current_w[j])
+            model.Add(y_end_j == y[j] + current_d[j])
+
+            # Geometry Logic
+            model.Add(x_end_i <= x[j]).OnlyEnforceIf(left)
+            model.Add(x_end_j <= x[i]).OnlyEnforceIf(right)
+            model.Add(y_end_i <= y[j]).OnlyEnforceIf(behind)
+            model.Add(y_end_j <= y[i]).OnlyEnforceIf(front)
             model.Add(z[i] + items[i].h <= z[j]).OnlyEnforceIf(below)
             model.Add(z[j] + items[j].h <= z[i]).OnlyEnforceIf(above)
 
-            # Non-overlap enforcement
+            # Ensure they don't overlap
             model.AddBoolOr([left, right, behind, front, below, above]).OnlyEnforceIf([is_packed[i], is_packed[j]])
 
-            # --- PHYSICS CONSTRAINTS ---
-            
-            # Rule 1: HEAVIEST ON BOTTOM
+            # --- SMART PHYSICS CONSTRAINTS ---
+
+            # Rule 1: HEAVIEST ON BOTTOM (Strict)
+            # If Item I is heavier, it CANNOT be on top of J
             if items[i].weight > items[j].weight:
                 model.Add(above == False)
             elif items[j].weight > items[i].weight:
                 model.Add(below == False)
 
-            # Rule 2: BIGGEST AREA ON BOTTOM (Stability)
-            # Use 1.2 buffer to allow similar items to stack
+            # Rule 2: BIGGEST AREA ON BOTTOM (Relaxed)
+            # Prevent large items on top... UNLESS they are very light.
+            
+            # If I is Bigger Area than J
             if items[i].area > items[j].area * 1.2:
-                model.Add(above == False)
+                # Only forbid if I is heavy (> 60% of J's weight)
+                if items[i].weight > items[j].weight * 0.6: 
+                     model.Add(above == False)
+            
+            # If J is Bigger Area than I
             elif items[j].area > items[i].area * 1.2:
-                model.Add(below == False)
+                if items[j].weight > items[i].weight * 0.6:
+                    model.Add(below == False)
 
-    # --- 3. DENSITY OBJECTIVE ---
-    # We want to maximize a score calculated as:
-    # (Volume Packed) - (Penalty for Height) - (Gravity)
-    
+    # --- 3. OBJECTIVE (Density) ---
     volume_score = 0
     gravity_score = 0
     
     for i, item in enumerate(items):
-        # Large reward for packing an item
+        # Reward packing items
         volume_score += (is_packed[i] * item.volume)
-        # Small penalty for Z position (pushes individual items down)
+        # Penalize height (Gravity)
         gravity_score += z[i]
     
-    # We prioritize Volume heavily (10000x), then penalize Max Height (1000x), then Gravity (1x)
-    # This forces the solver to fill the layer completely before moving up.
+    # Formula: Maximize Volume - Minimize Peak Height - Minimize Total Height
     model.Maximize(
-        (volume_score * 10000) - (max_z * 1000) - gravity_score
+        (volume_score * 100000) - (max_z * 1000) - gravity_score
     )
 
-    # --- 4. Solve ---
+    # --- 4. SOLVE ---
     solver = cp_model.CpSolver()
-    # High density requires more computation time
     solver.parameters.max_time_in_seconds = 30.0 
-    # Use all CPU cores to find the best fit
     solver.parameters.num_search_workers = 8 
     
     status = solver.Solve(model)
 
-    # Processing results
     packed_items_data = []
     unpacked_indices = []
     
     if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         for i, item in enumerate(items):
             if solver.BooleanValue(is_packed[i]):
+                # Resolve final dimensions
+                final_w = item.w if solver.Value(rotation[i]) == 0 else item.d
+                final_d = item.d if solver.Value(rotation[i]) == 0 else item.w
+                
                 packed_items_data.append({
                     "id": item.id,
                     "name": item.name,
                     "x": solver.Value(x[i]),
                     "y": solver.Value(y[i]),
                     "z": solver.Value(z[i]),
-                    "w": item.w, "h": item.h, "d": item.d, "weight": item.weight
+                    "w": final_w, 
+                    "h": item.h, 
+                    "d": final_d, 
+                    "weight": item.weight,
+                    "rotated": bool(solver.Value(rotation[i]))
                 })
             else:
                 unpacked_indices.append(i)
@@ -137,13 +177,12 @@ def solve_single_pallet(items, pallet_w, pallet_d, pallet_h):
     return packed_items_data, unpacked_indices
 
 
-# --- MULTI-PALLET SOLVER LOOP ---
+# --- 3. MULTI-PALLET LOOP ---
 def solve_multiple_pallets(items, pallet_w, pallet_d, pallet_h):
     all_pallets = []
     
-    # CRITICAL STEP FOR DENSITY:
-    # Sort input items by Weight (desc) and Volume (desc).
-    # It is mathematically much easier to pack big rocks first, then fill gaps with sand.
+    # Sort items: Heaviest + Largest Volume first
+    # This helps the solver find the "base" layer easier
     items.sort(key=lambda x: (x.weight, x.volume), reverse=True)
     
     remaining_items = items.copy()
@@ -175,38 +214,33 @@ def solve_multiple_pallets(items, pallet_w, pallet_d, pallet_h):
     
     return all_pallets
 
-# --- TEST DATA ---
-all_items = [
-    # Heavy Anvil (Must be on bottom)
-    Item("Anvil", "Heavy Anvil", 10, 10, 10, weight=50), 
-    # Light Pillows (Must be on top/floor)
-    Item("Pillows", "Light Box", 30, 30, 30, weight=5),
-    
-    # A mix of medium items to test density
-    Item("Med1", "Normal Box", 20, 20, 20, weight=10),
-    Item("Med2", "Normal Box", 20, 20, 20, weight=10),
-    Item("Med3", "Normal Box", 20, 20, 20, weight=10),
-    Item("Med4", "Normal Box", 20, 20, 20, weight=10),
-    
-    # Odd shapes
-    Item("Tall", "Tall Item", 10, 10, 60, weight=15),
-    Item("Flat", "Flat Item", 60, 60, 5, weight=20),
-    
-    # Large Heavy items (Should form the base)
-    Item("Heavy1", "Heavy Base 1", 45, 45, 20, weight=98),
-    Item("Heavy2", "Heavy Base 2", 45, 45, 20, weight=99),
-    Item("Heavy3", "Heavy Base 3", 45, 45, 20, weight=101),
-    Item("Heavy4", "Heavy Base 4", 45, 45, 20, weight=97),
-]
+# --- 4. TEST EXECUTION ---
+if __name__ == "__main__":
+    # Test Data: A mix of Heavy bases, Light/Large tops, and fillers
+    all_items = [
+        # Heavy Bases (Should be on bottom)
+        Item("Heavy1", "Heavy Base 1", 45, 45, 20, weight=98),
+        Item("Heavy2", "Heavy Base 2", 45, 45, 20, weight=99),
+        Item("Heavy3", "Heavy Base 3", 45, 45, 20, weight=101),
+        Item("Heavy4", "Heavy Base 4", 45, 45, 20, weight=97),
 
-# --- EXECUTION ---
-print("=" * 60)
-print("HIGH DENSITY BIN PACKING SOLVER")
-print("=" * 60)
+        # The Problem Item: Light but Huge (Should stack on top now)
+        Item("Flat", "Flat Item", 60, 60, 5, weight=20),
+        
+        # Fillers
+        Item("Anvil", "Heavy Anvil", 10, 10, 10, weight=50), 
+        Item("Med1", "Normal Box", 20, 20, 20, weight=10),
+        Item("Med2", "Normal Box", 20, 20, 20, weight=10),
+        Item("Tall", "Tall Item", 10, 10, 60, weight=15),
+    ]
 
-final_manifest = solve_multiple_pallets(all_items, 100, 100, 100)
+    print("=" * 60)
+    print("SMART DENSITY BIN PACKING SOLVER")
+    print("=" * 60)
 
-print("\n" + "=" * 60)
-print("FINAL RESULT (JSON):")
-print("=" * 60)
-print(json.dumps(final_manifest, indent=2))
+    final_manifest = solve_multiple_pallets(all_items, 100, 100, 100)
+
+    print("\n" + "=" * 60)
+    print("FINAL RESULT (JSON):")
+    print("=" * 60)
+    print(json.dumps(final_manifest, indent=2))
