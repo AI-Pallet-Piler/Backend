@@ -307,7 +307,8 @@ if __name__ == "__main__":
     print("ULTIMATE DENSITY BIN PACKING SOLVER")
     print("=" * 60)
 
-    final_manifest = solve_multiple_pallets(all_items, 100, 100, 100)
+    # Euro Pallet dimensions: 80cm x 120cm, Max height 180cm
+    final_manifest = solve_multiple_pallets(all_items, 80, 120, 180)
 
     print("\n" + "=" * 60)
     print("FINAL RESULT (JSON):")
