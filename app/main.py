@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio.session import AsyncSession
 
@@ -23,6 +24,26 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan, redirect_slashes=False)
+
+# CORS configuration for development: allow the local Vite dev server and the LAN IP address used.
+origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://192.168.0.204:5173",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    "http://localhost:3000",        
+    "http://127.0.0.1:3000",       
+    "http://192.168.0.204:3000",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Register API routers
 app.include_router(auth_router, prefix="/api/v1")
