@@ -8,6 +8,7 @@ from sqlmodel import select
 
 from app.db import get_db
 from app.models import Product
+from app.models.models import Inventory, Location
 from sqlmodel import SQLModel
 
 
@@ -26,6 +27,8 @@ class ProductCreate(SQLModel):
     max_stack_layers: int = 10
     pick_frequency: int = 0
     popularity_score: Decimal = Decimal("0")
+    initial_quantity: int = 0  # New field for initial inventory quantity
+    location_code: Optional[str] = None  # Optional location code for inventory
 
 
 # Full update body: same as create (no product_id, created_at, updated_at)
@@ -126,14 +129,69 @@ async def create_product(
     db: AsyncSession = Depends(get_db),
 ) -> Product:
     now = _naive_utc_now()
+    
+    # Extract inventory-related fields
+    initial_quantity = payload.initial_quantity
+    location_code = payload.location_code
+    
+    # Create product (exclude inventory fields from product creation)
+    product_data = payload.model_dump(exclude={"initial_quantity", "location_code"})
     product = Product(
-        **payload.model_dump(),
+        **product_data,
         created_at=now,
         updated_at=now,
     )
     db.add(product)
     await db.commit()
     await db.refresh(product)
+    
+    # Create inventory entry if initial_quantity > 0
+    if initial_quantity > 0:
+        # Get or create default location
+        if location_code:
+            # Try to find location by code
+            location_result = await db.execute(
+                select(Location).where(Location.location_code == location_code)
+            )
+            location = location_result.scalar_one_or_none()
+            
+            if not location:
+                # Create location if it doesn't exist
+                location = Location(
+                    location_code=location_code,
+                    location_type="picking",
+                    is_active=True
+                )
+                db.add(location)
+                await db.commit()
+                await db.refresh(location)
+        else:
+            # Use or create a default location
+            default_location_code = "DEFAULT-01"
+            location_result = await db.execute(
+                select(Location).where(Location.location_code == default_location_code)
+            )
+            location = location_result.scalar_one_or_none()
+            
+            if not location:
+                location = Location(
+                    location_code=default_location_code,
+                    location_type="picking",
+                    is_active=True
+                )
+                db.add(location)
+                await db.commit()
+                await db.refresh(location)
+        
+        # Create inventory record
+        inventory = Inventory(
+            product_id=product.product_id,
+            location_id=location.location_id,
+            quantity=initial_quantity
+        )
+        db.add(inventory)
+        await db.commit()
+    
     return product
 
 
