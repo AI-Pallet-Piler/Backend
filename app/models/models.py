@@ -113,7 +113,7 @@ class Inventory(SQLModel, table=True):
     __tablename__ = "inventory"
     
     inventory_id: Optional[int] = Field(default=None, primary_key=True)
-    product_id: int = Field(foreign_key="products.product_id")
+    product_id: int = Field(foreign_key="products.product_id", ondelete="CASCADE")
     location_id: int = Field(foreign_key="locations.location_id")
     quantity: int = Field(default=0)
     
