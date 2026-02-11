@@ -41,6 +41,11 @@ router = APIRouter(prefix="/products", tags=["products"])
 
 
 @router.get(
+    "",
+    response_model=List[Product],
+    summary="List products",
+)
+@router.get(
     "/",
     response_model=List[Product],
     summary="List products",
@@ -104,6 +109,12 @@ async def get_product(
     return product
 
 
+@router.post(
+    "",
+    response_model=Product,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a new product",
+)
 @router.post(
     "/",
     response_model=Product,
