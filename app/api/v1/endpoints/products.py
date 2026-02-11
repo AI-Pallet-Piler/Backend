@@ -257,6 +257,15 @@ async def delete_product(
             detail="Product not found",
         )
 
+    # Delete related inventory records first
+    inventory_stmt = select(Inventory).where(Inventory.product_id == product_id)
+    inventory_result = await db.execute(inventory_stmt)
+    inventory_records = inventory_result.scalars().all()
+    
+    for inventory in inventory_records:
+        await db.delete(inventory)
+    
+    # Now delete the product
     await db.delete(product)
     await db.commit()
     return None
