@@ -10,6 +10,14 @@ from app.models.models import User
 
 router = APIRouter(prefix="/users", tags=["users"])
 
+@router.get("/badge/{badge_number}", response_model=User)
+async def get_user_by_badge(badge_number: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(User).where(User.badge_number == badge_number))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
 @router.get("", response_model=List[User])
 @router.get("/", response_model=List[User])
 async def list_users(db: AsyncSession = Depends(get_db)):
