@@ -4,6 +4,9 @@ from . import piler
 import json
 from app.models.models import OrderLine, Product, Order
 from app.db import engine
+from datetime import datetime
+import os
+from pathlib import Path
 
 async def main():
     # example items to test the algorithm. You can modify this list to test different scenarios. 
@@ -77,12 +80,17 @@ async def main():
                 pallet_D = 100 # Max depth of the pallet load
 
                 pallet_instruction_json = piler.solve_multiple_pallets(all_items, pallet_W, pallet_D, pallet_H)
-
-                print(f"json for order: {order.order_number}")
-                print(f"Order id: {order.order_id}")
-                print("=" * 60)
-                print(json.dumps(pallet_instruction_json, indent=2))
                 
+                # Save the pallet instruction JSON to a file in the Pallets_json directory
+                # Get the directory where this script is located
+                script_dir = Path(__file__).parent
+                output_dir = script_dir / "Pallets_Json"
+                output_dir.mkdir(parents=True, exist_ok=True)
+                
+                filename = output_dir / f"pallet_instructions_{order.order_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                with open(filename, 'w') as f:
+                    json.dump(pallet_instruction_json, f, indent=2)
+                print(f"Pallet instructions saved to {filename}")
 
         await conn.run_sync(get_products)
 
