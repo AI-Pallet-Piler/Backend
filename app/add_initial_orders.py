@@ -13,13 +13,14 @@ async def create_test_data():
         def add_data(sync_conn):
             with Session(bind=sync_conn) as session:
                 print("🗑️  Cleaning up old test data...")
-                existing_order = session.exec(select(Order).where(Order.order_number == "ORD-TEST-001")).first()
-                if existing_order:
-                    lines = session.exec(select(OrderLine).where(OrderLine.order_id == existing_order.order_id)).all()
-                    for line in lines: 
-                        session.delete(line)
-                    session.delete(existing_order)
-                    session.commit()
+                for order_num in ["ORD-TEST-001", "ORD-TEST-002", "ORD-TEST-003", "ORD-TEST-004"]:
+                    existing_order = session.exec(select(Order).where(Order.order_number == order_num)).first()
+                    if existing_order:
+                        lines = session.exec(select(OrderLine).where(OrderLine.order_id == existing_order.order_id)).all()
+                        for line in lines: 
+                            session.delete(line)
+                        session.delete(existing_order)
+                session.commit()
 
                 print("📦 Creating Products (Realistic E-Commerce Set)...")
                 
@@ -129,45 +130,93 @@ async def create_test_data():
                 session.flush()
                 print(f"   ✓ Stocked {len(db_products)} products across {len(db_locations[:3])} locations")
 
-                print("\n📝 Creating Test Order...")
-                order = Order(
-                    order_number="ORD-TEST-001",
-                    customer_name="TechCorp Distribution Center",
-                    status=OrderStatus.NEW,
-                    priority=2,
-                    promised_ship_date=datetime.utcnow() + timedelta(days=2)
-                )
-                session.add(order)
-                session.flush()
-
-                print("🔗 Linking Items to Order...")
-                order_quantities = {
-                    "ELEC-002": 3,    # Desktop Monitors
-                    "BOOK-002": 12,   # Novels
-                    "HOME-001": 2,    # Coffee Makers
-                    "KITC-001": 1,    # Dish Sets
-                    "CLOTH-001": 5,   # Winter Jackets
-                    "BEVER-001": 2,   # Water Bottles
-                    "TOY-001": 4,     # LEGO Sets
-                }
-
-                for product in db_products:
-                    if product.sku in order_quantities:
-                        line = OrderLine(
-                            order_id=order.order_id,
-                            product_id=product.product_id,
-                            quantity_ordered=order_quantities[product.sku],
-                            quantity_picked=0
-                        )
-                        session.add(line)
-
-                session.commit()
+                print("\n📝 Creating Multiple Test Orders...")
                 
-                total_items = sum(order_quantities.values())
-                print(f"\n✅ Success! Created realistic order #{order.order_number}")
-                print(f"   - Products: {len(order_quantities)}")
-                print(f"   - Total Items: {total_items}")
-                print(f"   - Promised Ship: {order.promised_ship_date.strftime('%Y-%m-%d')}")
+                # Order 1: Electronics Heavy Order
+                orders_config = [
+                    {
+                        "order_number": "ORD-TEST-001",
+                        "customer_name": "TechCorp Distribution Center",
+                        "status": OrderStatus.NEW,
+                        "priority": 2,
+                        "days_ahead": 2,
+                        "items": {
+                            "ELEC-002": 3,    # Desktop Monitors
+                            "ELEC-003": 10,   # Wireless Keyboards
+                            "HOME-001": 2,    # Coffee Makers
+                        }
+                    },
+                    {
+                        "order_number": "ORD-TEST-002",
+                        "customer_name": "BookStore Online",
+                        "status": OrderStatus.NEW,
+                        "priority": 1,
+                        "days_ahead": 1,
+                        "items": {
+                            "BOOK-001": 5,    # Encyclopedia Sets
+                            "BOOK-002": 20,   # Novels
+                            "TOY-001": 8,     # LEGO Sets
+                        }
+                    },
+                    {
+                        "order_number": "ORD-TEST-003",
+                        "customer_name": "Home & Kitchen Retailers",
+                        "status": OrderStatus.NEW,
+                        "priority": 3,
+                        "days_ahead": 3,
+                        "items": {
+                            "KITC-001": 4,    # Ceramic Dish Sets
+                            "KITC-002": 6,    # Stainless Steel Pots
+                            "HOME-002": 3,    # Blender Pro
+                            "BEVER-001": 2,   # Water Bottles
+                        }
+                    },
+                    {
+                        "order_number": "ORD-TEST-004",
+                        "customer_name": "Sports & Fashion Co",
+                        "status": OrderStatus.NEW,
+                        "priority": 2,
+                        "days_ahead": 4,
+                        "items": {
+                            "CLOTH-001": 15,  # Winter Jackets
+                            "CLOTH-002": 10,  # Jeans Bundle
+                            "SPORT-002": 5,   # Yoga Mat Bundle
+                            "TOY-002": 6,     # Toy Car Collection
+                        }
+                    },
+                ]
+
+                for order_config in orders_config:
+                    order = Order(
+                        order_number=order_config["order_number"],
+                        customer_name=order_config["customer_name"],
+                        status=order_config["status"],
+                        priority=order_config["priority"],
+                        promised_ship_date=datetime.utcnow() + timedelta(days=order_config["days_ahead"])
+                    )
+                    session.add(order)
+                    session.flush()
+
+                    print(f"\n🔗 Order #{order_config['order_number']} - {order_config['customer_name']}")
+                    
+                    total_items = 0
+                    for product in db_products:
+                        if product.sku in order_config["items"]:
+                            qty = order_config["items"][product.sku]
+                            line = OrderLine(
+                                order_id=order.order_id,
+                                product_id=product.product_id,
+                                quantity_ordered=qty,
+                                quantity_picked=0
+                            )
+                            session.add(line)
+                            total_items += qty
+                            print(f"   + {qty}x {product.name}")
+
+                    session.commit()
+                    print(f"   ✅ Total items: {total_items} | Ship date: {order.promised_ship_date.strftime('%Y-%m-%d')}")
+
+                print(f"\n✅ Success! Created 4 test orders with varying complexity and priorities")
         
         await conn.run_sync(add_data)
 
