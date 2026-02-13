@@ -1,98 +1,82 @@
 import asyncio
+import json
 from sqlmodel import Session, select
 from . import piler
-import json
-from app.models.models import OrderLine, Product, Order
+from app.models.models import OrderLine, Product, Order, OrderStatus
 from app.db import engine
 from datetime import datetime
-import os
 from pathlib import Path
 
 async def main():
-    # example items to test the algorithm. You can modify this list to test different scenarios. 
-    # all_items = [
-    #     # Heavy Bases
-    #     piler.Item("Heavy1", "Heavy Base 1", 45, 45, 20, weight=98),
-    #     piler.Item("Heavy2", "Heavy Base 2", 45, 45, 20, weight=99),
-    #     piler.Item("Heavy3", "Heavy Base 3", 45, 45, 20, weight=101),
-    #     piler.Item("Heavy4", "Heavy Base 4", 45, 45, 20, weight=97),
-
-    #     # Light but Huge (Should stack on top)
-    #     piler.Item("Flat", "Flat Item", 60, 60, 5, weight=20),
-        
-    #     # TALL ITEM: 10x10x60. Should tip over to become 60x10x10 or 10x60x10
-    #     piler.Item("Tall", "Tall Item", 10, 10, 60, weight=15),
-        
-    #     # Fillers
-    #     piler.Item("Anvil", "Heavy Anvil", 10, 10, 10, weight=50), 
-    #     piler.Item("Med1", "Normal Box", 20, 20, 20, weight=10),
-    # ]
-
     async with engine.begin() as conn:
-        def get_products(sync_conn):
+        def process_orders(sync_conn):
             with Session(bind=sync_conn) as session:
-                # 1. Get the first NEW order
-                # Note: Your model likely uses 'status' not 'OrderStatus' based on previous context
-                order = session.exec(select(Order).where(Order.status == "new")).first()
                 
-                if not order:
-                    print("No new orders found.")
+                # Get ALL orders with NEW status, not just one
+                statement = select(Order).where(Order.status == OrderStatus.NEW)
+                orders = session.exec(statement).all()
+                
+                print(f"Found {len(orders)} orders to process\n")
+                
+                if not orders:
+                    print("No orders found with NEW status")
                     return
-
-                print(f"Processing Order #{order.order_number}")
-
-                # 2. Get Lines AND Products in one shot using a JOIN
-                # This says: "Get the Line and the matching Product for this order"
-                query = (
-                    select(OrderLine, Product)
-                    .join(Product, OrderLine.product_id == Product.product_id)
-                    .where(OrderLine.order_id == order.order_id)
-                )
                 
-                results = session.exec(query).all()
-
-                all_items = []
-
-                # 3. Loop through the joined results
-                for line, product in results:
-                    print(f" - Found {line.quantity_ordered} x {product.name}")
+                # Process each order
+                for order in orders:
+                    print(f"Processing Order #{order.order_number}")
                     
-                    # Create one item for EACH unit (e.g. 5x Box -> 5 items)
-                    # Use 'line.quantity_ordered' based on your models.py
-                    for i in range(line.quantity_ordered):
-                        item = piler.Item(
-                            id=f"{product.sku}-{i}",  # Unique ID for tracking
-                            name=product.name,
-                            w=int(product.width_cm),
-                            d=int(product.length_cm),
-                            h=int(product.height_cm),
-                            weight=float(product.weight_kg),
-                            # Ensure attribute matches your model (requires_upright vs allow_tipping)
-                            allow_tipping=not product.requires_upright 
-                        )
-                        all_items.append(item)
+                    # Get order lines
+                    order_lines = session.exec(
+                        select(OrderLine).where(OrderLine.order_id == order.order_id)
+                    ).all()
+                    
+                    print(f"  Items in order: {len(order_lines)}")
+                    
+                    all_items = []
+                    for line in order_lines:
+                        product = session.exec(
+                            select(Product).where(Product.product_id == line.product_id)
+                        ).first()
+                        
+                        # Create piler items for each quantity
+                        for i in range(line.quantity_ordered):
+                            item = piler.Item(
+                                id=f"{product.sku}-{i}",
+                                name=product.name,
+                                w=int(product.width_cm),
+                                d=int(product.length_cm),
+                                h=int(product.height_cm),
+                                weight=float(product.weight_kg),
+                                allow_tipping=not product.requires_upright
+                            )
+                            all_items.append(item)
+                        
+                        print(f"   - Found {line.quantity_ordered}x {product.name}")
+                    
+                    total_items = len(all_items)
+                    print(f"  Total items to pack: {total_items}")
+                    
+                    # Run packing algorithm
+                    pallet_H = 150  # Max height
+                    pallet_W = 120  # Max width
+                    pallet_D = 100  # Max depth
+                    
+                    print(f"  Starting job with {total_items} items...")
+                    pallet_instruction_json = piler.solve_multiple_pallets(all_items, pallet_W, pallet_D, pallet_H)
+                    
+                    # Save results to file
+                    script_dir = Path(__file__).parent
+                    output_dir = script_dir / "Pallets_Json"
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    filename = output_dir / f"pallet_instructions_{order.order_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                    with open(filename, 'w') as f:
+                        json.dump(pallet_instruction_json, f, indent=2)
+                    
+                    print(f"Saved: {filename.name}\n")
 
-                print(f"Total items to pack: {len(all_items)}")
-
-                # 4. Run the packing algorithm
-                pallet_H = 150 # Max height of the pallet load
-                pallet_W = 120 # Max width of the pallet load
-                pallet_D = 100 # Max depth of the pallet load
-
-                pallet_instruction_json = piler.solve_multiple_pallets(all_items, pallet_W, pallet_D, pallet_H)
-                
-                # Save the pallet instruction JSON to a file in the Pallets_json directory
-                # Get the directory where this script is located
-                script_dir = Path(__file__).parent
-                output_dir = script_dir / "Pallets_Json"
-                output_dir.mkdir(parents=True, exist_ok=True)
-                
-                filename = output_dir / f"pallet_instructions_{order.order_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-                with open(filename, 'w') as f:
-                    json.dump(pallet_instruction_json, f, indent=2)
-                print(f"Pallet instructions saved to {filename}")
-
-        await conn.run_sync(get_products)
+        await conn.run_sync(process_orders)
 
 if __name__ == "__main__":
     asyncio.run(main())
