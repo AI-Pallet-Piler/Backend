@@ -3,6 +3,8 @@ import json
 import os
 from datetime import datetime
 
+# This file will output a json when run
+
 # --- 1. DATA STRUCTURE ---
 class Item:
     def __init__(self, id, name, w, d, h, weight, allow_tipping=True):
@@ -284,89 +286,3 @@ def solve_multiple_pallets(items, pallet_w, pallet_d, pallet_h):
         pallet_number += 1
     
     return all_pallets
-
-
-def save_pallet_manifest(manifest_data, output_dir="Pallets_Json"):
-    """
-    Save the pallet manifest to a JSON file.
-    
-    Args:
-        manifest_data: The pallet manifest data (list or dict)
-        output_dir: Directory to save the JSON file (default: "Pallets_Json")
-    
-    Returns:
-        str: Path to the saved file
-    """
-    # Get the script's directory
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # Create the full path to the output directory
-    output_path = os.path.join(script_dir, output_dir)
-    
-    # Create the directory if it doesn't exist
-    os.makedirs(output_path, exist_ok=True)
-    
-    # Counter file to persist the ID across script runs
-    counter_file = os.path.join(output_path, ".counter")
-    
-    # Read the current counter from file, or initialize to 1
-    if os.path.exists(counter_file):
-        with open(counter_file, 'r') as f:
-            counter = int(f.read().strip())
-    else:
-        counter = 1
-    
-    # Generate filename with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"pallet_manifest_{counter}_{timestamp}.json"
-    filepath = os.path.join(output_path, filename)
-    
-    # Save the JSON file
-    with open(filepath, 'w', encoding='utf-8') as f:
-        json.dump(manifest_data, f, indent=2)
-
-    # Increase counter and save to file for next run
-    counter += 1
-    with open(counter_file, 'w') as f:
-        f.write(str(counter))
-    
-    return filepath
-
-
-# --- 4. TEST EXECUTION ---
-if __name__ == "__main__":
-    all_items = [
-        # Heavy Bases
-        Item("Heavy1", "Heavy Base 1", 45, 45, 20, weight=98),
-        Item("Heavy2", "Heavy Base 2", 45, 45, 20, weight=99),
-        Item("Heavy3", "Heavy Base 3", 45, 45, 20, weight=101),
-        Item("Heavy4", "Heavy Base 4", 45, 45, 20, weight=97),
-
-        # Light but Huge (Should stack on top)
-        Item("Flat", "Flat Item", 60, 60, 5, weight=20),
-        
-        # TALL ITEM: 10x10x60. Should tip over to become 60x10x10 or 10x60x10
-        Item("Tall", "Tall Item", 10, 10, 60, weight=15),
-        
-        # Fillers
-        Item("Anvil", "Heavy Anvil", 10, 10, 10, weight=50), 
-        Item("Med1", "Normal Box", 20, 20, 20, weight=10),
-    ]
-
-    print("=" * 60)
-    print("ULTIMATE DENSITY BIN PACKING SOLVER")
-    print("=" * 60)
-
-    # Euro Pallet dimensions: 80cm x 120cm, Max height 180cm
-    final_manifest = solve_multiple_pallets(all_items, 80, 120, 180)
-
-    print("\n" + "=" * 60)
-    print("FINAL RESULT (JSON):")
-    print("=" * 60)
-    print(json.dumps(final_manifest, indent=2))
-    
-    # Save to file
-    saved_file = save_pallet_manifest(final_manifest)
-    print("\n" + "=" * 60)
-    print(f"✓ Manifest saved to: {saved_file}")
-    print("=" * 60)
