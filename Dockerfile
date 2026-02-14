@@ -24,9 +24,6 @@ RUN pip install --upgrade pip && \
 # Copy application code
 COPY app/ ./app/
 
-# Copy environment file
-COPY .env .env
-
 # Expose port (adjust if your app uses a different port)
 EXPOSE 8000
 
