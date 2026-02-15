@@ -9,6 +9,7 @@ from app.api.v1.endpoints.inventory import router as inventory_router
 from app.api.v1.endpoints.products import router as products_router
 from app.api.v1.endpoints.users import router as users_router
 from app.db import create_tables, get_db
+from app.services.packing_service import start_packing_service
 
 
 @asynccontextmanager
@@ -16,6 +17,10 @@ async def lifespan(app: FastAPI):
     # Startup logic
     await create_tables()
     print("Database tables created successfully!")
+    
+    # Start packing service for automatic order processing
+    await start_packing_service()
+    print("Packing service started!")
 
     yield  # Application runs while inside this block
 

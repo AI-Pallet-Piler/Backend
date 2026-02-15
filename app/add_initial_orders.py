@@ -1,12 +1,44 @@
 import asyncio
+import httpx
 from sqlmodel import Session, select
 from decimal import Decimal
 import os
 from datetime import datetime, timedelta
+import time
 
 # --- IMPORTS ---
 from app.models.models import Order, OrderLine, Product, OrderStatus, Location, LocationType, Inventory
 from app.db import engine
+
+
+async def trigger_packing_for_orders(order_ids: list[int]):
+    """
+    Trigger the packing algorithm for a list of order IDs via the API.
+    
+    Args:
+        order_ids: List of order IDs to process
+    """
+    api_url = os.getenv("API_URL", "http://localhost:8000")
+    
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for order_id in order_ids:
+            try:
+                print(f"   \u23f3 Triggering packing for order ID {order_id}...")
+                response = await client.post(f"{api_url}/api/v1/orders/{order_id}/trigger-packing")
+                
+                if response.status_code == 202:
+                    print(f"   \u2705 Order {order_id} queued for packing")
+                else:
+                    print(f"   \u26a0\ufe0f  Order {order_id} - Status {response.status_code}: {response.text}")
+                    
+                # Small delay between requests
+                time.sleep(0.5)
+                
+            except Exception as e:
+                print(f"   \u274c Error triggering packing for order {order_id}: {str(e)}")
+    
+    print("\\n\u2705 Packing triggers completed. Check backend logs for processing status.")
+
 
 async def create_test_data():
     async with engine.begin() as conn:
@@ -217,8 +249,31 @@ async def create_test_data():
                     print(f"   ✅ Total items: {total_items} | Ship date: {order.promised_ship_date.strftime('%Y-%m-%d')}")
 
                 print(f"\n✅ Success! Created 4 test orders with varying complexity and priorities")
+                
+                # Store order numbers to query after transaction commits
+                return [cfg["order_number"] for cfg in orders_config]
         
-        await conn.run_sync(add_data)
+        order_numbers = await conn.run_sync(add_data)
+    
+    # Transaction is now committed, query for order IDs
+    print("\n🔍 Retrieving order IDs...")
+    async with engine.connect() as conn:
+        def get_order_ids(sync_conn):
+            with Session(bind=sync_conn) as session:
+                orders = session.exec(select(Order).where(
+                    Order.order_number.in_(order_numbers)
+                )).all()
+                return [order.order_id for order in orders]
+        
+        order_ids = await conn.run_sync(get_order_ids)
+    
+    if order_ids:
+        # Trigger packing algorithm for each order
+        print(f"📦 Found {len(order_ids)} orders to process")
+        print("\n🚀 Triggering packing algorithm for created orders...")
+        await trigger_packing_for_orders(order_ids)
+    else:
+        print("⚠️  No orders found to trigger packing")
 
 if __name__ == "__main__":
     asyncio.run(create_test_data())
