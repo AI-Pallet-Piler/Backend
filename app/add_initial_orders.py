@@ -18,7 +18,9 @@ async def trigger_packing_for_orders(order_ids: list[int]):
     Args:
         order_ids: List of order IDs to process
     """
-    api_url = os.getenv("API_URL", "http://localhost:8000")
+    # Use API Gateway - use service name when inside Docker, localhost when running on host
+    # Check if we're inside Docker by looking for Docker environment indicators
+    api_url = os.getenv("API_URL", "http://api-gateway:8080" if os.path.exists("/.dockerenv") else "http://localhost:8080")
     
     async with httpx.AsyncClient(timeout=30.0) as client:
         for order_id in order_ids:
@@ -48,9 +50,12 @@ async def create_test_data():
                 for order_num in ["ORD-TEST-001", "ORD-TEST-002", "ORD-TEST-003", "ORD-TEST-004"]:
                     existing_order = session.exec(select(Order).where(Order.order_number == order_num)).first()
                     if existing_order:
+                        # Delete order lines first
                         lines = session.exec(select(OrderLine).where(OrderLine.order_id == existing_order.order_id)).all()
                         for line in lines: 
                             session.delete(line)
+                        session.flush()  # Flush order line deletions before deleting order
+                        # Now delete the order
                         session.delete(existing_order)
                 session.commit()
 
