@@ -103,11 +103,11 @@ async def process_single_order(order_id: int, db: AsyncSession) -> Optional[str]
         
         logger.info(f"Successfully saved pallet instructions: {filename.name}")
         
-        # Update order status to PICKING
-        order.status = OrderStatus.PICKING
+        # Update order status to PACKING (ready for picking)
+        order.status = OrderStatus.PACKING
         db.add(order)
         await db.commit()
-        logger.info(f"Order {order.order_number} status updated to PICKING")
+        logger.info(f"Order {order.order_number} status updated to PACKING (ready for picking)")
         
         return str(filename)
         
@@ -187,11 +187,11 @@ async def process_all_new_orders():
                     
                     print(f"Saved: {filename.name}")
                     
-                    # Update status to PICKING
-                    order.status = OrderStatus.PICKING
+                    # Update status to PACKING (ready for picking)
+                    order.status = OrderStatus.PACKING
                     session.add(order)
                     session.commit()
-                    print(f"Order {order.order_number} status updated to PICKING\n")
+                    print(f"Order {order.order_number} status updated to PACKING (ready for picking)\n")
 
         await conn.run_sync(process_orders)
 
