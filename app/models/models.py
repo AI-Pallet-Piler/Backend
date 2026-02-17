@@ -55,6 +55,13 @@ class PickTaskStatus(str, PyEnum):
     COMPLETED = "completed"
 
 
+class IssueType(str, PyEnum):
+    DAMAGE = "damage"
+    MISSING = "missing"
+    BLOCKED = "blocked"
+    OTHER = "other"
+
+
 # Models
 class User(SQLModel, table=True):
     __tablename__ = "users"
@@ -211,3 +218,22 @@ class PickTask(SQLModel, table=True):
     __table_args__ = (
         Index("idx_pick_task_order_sequence", "order_id", "sequence_number"),
     )
+
+
+class Report(SQLModel, table=True):
+    __tablename__ = "reports"
+    
+    report_id: Optional[int] = Field(default=None, primary_key=True)
+    order_id: int = Field(foreign_key="orders.order_id", index=True)
+    order_number: Optional[str] = Field(default=None, max_length=50)
+    task_id: Optional[int] = Field(default=None, foreign_key="pick_tasks.task_id")
+    task_location: Optional[str] = Field(default=None, max_length=50)
+    task_sku: Optional[str] = Field(default=None, max_length=50)
+    issue_type: IssueType = Field(sa_column=Column(Enum(IssueType)))
+    message: str = Field(max_length=1000)
+    created_at: datetime = Field(default_factory=utc_now, sa_column=Column(TIMESTAMP))
+    
+    __table_args__ = (
+        Index("idx_report_order", "order_id", "created_at"),
+    )
+
