@@ -12,17 +12,9 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-
 async def process_single_order(order_id: int, db: AsyncSession) -> Optional[str]:
     """
     Process a single order through the packing algorithm.
-    
-    Args:
-        order_id: The ID of the order to process
-        db: Database session
-        
-    Returns:
-        Path to the generated JSON file, or None if processing failed
     """
     try:
         # Get the order
@@ -71,7 +63,9 @@ async def process_single_order(order_id: int, db: AsyncSession) -> Optional[str]
                     d=int(product.length_cm),
                     h=int(product.height_cm),
                     weight=float(product.weight_kg),
-                    allow_tipping=not product.requires_upright
+                    allow_tipping=not product.requires_upright,
+                    is_fragile=product.is_fragile,
+                    type_id=product.sku  # <--- EXPLICITLY PASS SKU TO FIX TOWER BUG
                 )
                 all_items.append(item)
             
@@ -85,9 +79,9 @@ async def process_single_order(order_id: int, db: AsyncSession) -> Optional[str]
         logger.info(f"  Total items to pack: {total_items}")
         
         # Run packing algorithm
-        pallet_H = 150  # Max height
-        pallet_W = 80   # Max width
-        pallet_D = 120  # Max depth
+        pallet_H = 150  
+        pallet_W = 80   
+        pallet_D = 120  
         
         logger.info(f"  Starting packing algorithm with {total_items} items...")
         pallet_instruction_json = piler.solve_multiple_pallets(all_items, pallet_W, pallet_D, pallet_H)
@@ -116,14 +110,13 @@ async def process_single_order(order_id: int, db: AsyncSession) -> Optional[str]
         await db.rollback()
         return None
 
-
 async def process_all_new_orders():
-    """Process all orders with NEW status. Legacy batch processing function."""
+    """Process all orders with NEW status."""
     async with engine.begin() as conn:
         def process_orders(sync_conn):
             with Session(bind=sync_conn) as session:
                 
-                # Get ALL orders with NEW status, not just one
+                # Get ALL orders with NEW status
                 statement = select(Order).where(Order.status == OrderStatus.NEW)
                 orders = session.exec(statement).all()
                 
@@ -137,7 +130,6 @@ async def process_all_new_orders():
                 for order in orders:
                     print(f"Processing Order #{order.order_number}")
                     
-                    # Get order lines
                     order_lines = session.exec(
                         select(OrderLine).where(OrderLine.order_id == order.order_id)
                     ).all()
@@ -150,7 +142,6 @@ async def process_all_new_orders():
                             select(Product).where(Product.product_id == line.product_id)
                         ).first()
                         
-                        # Create piler items for each quantity
                         for i in range(line.quantity_ordered):
                             item = piler.Item(
                                 id=f"{product.sku}-{i}",
@@ -159,7 +150,9 @@ async def process_all_new_orders():
                                 d=int(product.length_cm),
                                 h=int(product.height_cm),
                                 weight=float(product.weight_kg),
-                                allow_tipping=not product.requires_upright
+                                allow_tipping=not product.requires_upright,
+                                is_fragile=product.is_fragile,
+                                type_id=product.sku  # <--- EXPLICITLY PASS SKU HERE TOO
                             )
                             all_items.append(item)
                         
@@ -168,15 +161,14 @@ async def process_all_new_orders():
                     total_items = len(all_items)
                     print(f"  Total items to pack: {total_items}")
                     
-                    # Run packing algorithm
-                    pallet_H = 150  # Max height
-                    pallet_W = 80  # Max width
-                    pallet_D = 120  # Max depth
+                    pallet_H = 150 
+                    pallet_W = 80 
+                    pallet_D = 120 
                     
                     print(f"  Starting job with {total_items} items...")
                     pallet_instruction_json = piler.solve_multiple_pallets(all_items, pallet_W, pallet_D, pallet_H)
                     
-                    # Save results to file
+                    # Save results
                     script_dir = Path(__file__).parent
                     output_dir = script_dir / "Pallets_Json"
                     output_dir.mkdir(parents=True, exist_ok=True)
@@ -187,7 +179,6 @@ async def process_all_new_orders():
                     
                     print(f"Saved: {filename.name}")
                     
-                    # Update status to PACKING (ready for picking)
                     order.status = OrderStatus.PACKING
                     session.add(order)
                     session.commit()
