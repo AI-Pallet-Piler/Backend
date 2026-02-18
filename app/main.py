@@ -9,6 +9,7 @@ from app.api.v1.endpoints.auth import router as auth_router
 from app.api.v1.endpoints.inventory import router as inventory_router
 from app.api.v1.endpoints.orders import router as orders_router
 from app.api.v1.endpoints.products import router as products_router
+from app.api.v1.endpoints.reports import router as reports_router
 from app.api.v1.endpoints.users import router as users_router
 from app.api.v1.endpoints.user_service_users import router as user_service_users_router
 from app.db import create_tables, get_db
@@ -51,6 +52,7 @@ app.add_middleware(
 app.include_router(inventory_router, prefix="/api/v1")
 app.include_router(orders_router, prefix="/api/v1")
 app.include_router(products_router, prefix="/api/v1")
+app.include_router(reports_router, prefix="/api/v1")
 app.include_router(users_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api")
 app.include_router(user_service_users_router, prefix="/api")
