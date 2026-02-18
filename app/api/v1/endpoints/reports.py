@@ -1,6 +1,7 @@
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select, SQLModel
 
@@ -30,7 +31,7 @@ class ReportUpdate(SQLModel):
 
 class ReportResponse(SQLModel):
     """Schema for report responses."""
-    report_id: int
+    report_id: Optional[int]
     order_id: int
     order_number: Optional[str] = None
     task_id: Optional[int] = None
@@ -83,7 +84,7 @@ async def list_reports(
         stmt = stmt.where(Report.issue_type == issue_type)
     
     # Order by created_at descending and apply pagination
-    stmt = stmt.order_by(Report.created_at.desc()).offset(skip).limit(limit)
+    stmt = stmt.order_by(desc(Report.created_at)).offset(skip).limit(limit)  # type: ignore[arg-type]
     
     result = await db.execute(stmt)
     reports = result.scalars().all()
@@ -195,22 +196,7 @@ async def create_report(
     order_number = payload.order_number or order.order_number
     
     # Create report
-    report = RepINSERT INTO stacking_rules (
-        rule_id,
-        product_id_top,
-        product_id_bottom,
-        allowed,
-        max_overhang_cm,
-        reason
-      )
-    VALUES (
-        rule_id:integer,
-        product_id_top:integer,
-        product_id_bottom:integer,
-        allowed:boolean,
-        max_overhang_cm:numeric,
-        'reason:character varying'
-      );ort(
+    report = Report(
         order_id=payload.order_id,
         order_number=order_number,
         task_id=payload.task_id,
@@ -293,7 +279,7 @@ async def update_report(
     
     return ReportResponse(
         report_id=report.report_id,
-        order_id=report.order_id,
+        order_id=report.order_id,   
         order_number=report.order_number,
         task_id=report.task_id,
         task_location=report.task_location,
