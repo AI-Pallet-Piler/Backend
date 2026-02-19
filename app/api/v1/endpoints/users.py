@@ -8,6 +8,7 @@ from pydantic import field_validator
 
 from app.db import get_db
 from app.models.models import User, UserRole
+from app.core.security import hash_password
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -75,7 +76,7 @@ class UserCreate(SQLModel):
     name: str
     email: str
     badge_number: str
-    hashed_password: str
+    password: str  # plaintext password - will be hashed before storage
     role: UserRole
 
     @field_validator("role", mode="before")
@@ -100,7 +101,7 @@ async def create_user(user: UserCreate, db: AsyncSession = Depends(get_db)):
         name=user.name,
         email=user.email,
         badge_number=user.badge_number,
-        hashed_password=user.hashed_password,
+        hashed_password=hash_password(user.password),
         role=user.role
     )
     db.add(new_user)
