@@ -121,6 +121,12 @@ async def create_test_data():
                 
                 session.flush()
 
+                # Sort products by weight in descending order (heaviest first)
+                db_products.sort(key=lambda p: float(p.weight_kg), reverse=True)
+                print("📊 Products sorted by weight (heaviest first):")
+                for p in db_products:
+                    print(f"   {p.sku}: {p.weight_kg}kg - {p.name}")
+
                 print("\n📍 Creating Storage Locations (one per product)...")
                 
                 db_locations = []

@@ -4,7 +4,7 @@ import logging
 from sqlmodel import Session, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from . import piler
-from app.models.models import OrderLine, Product, Order, OrderStatus
+from app.models.models import OrderLine, Product, Order, OrderStatus, Inventory, Location
 from app.db import engine
 from datetime import datetime
 from pathlib import Path
@@ -54,6 +54,19 @@ async def process_single_order(order_id: int, db: AsyncSession) -> Optional[str]
                 logger.error(f"Product {line.product_id} not found")
                 continue
             
+            # Look up the warehouse location for this product
+            inv_stmt = select(Inventory).where(Inventory.product_id == product.product_id)
+            inv_result = await db.execute(inv_stmt)
+            inventory = inv_result.scalar_one_or_none()
+            
+            location_code = ""
+            if inventory:
+                loc_stmt = select(Location).where(Location.location_id == inventory.location_id)
+                loc_result = await db.execute(loc_stmt)
+                loc = loc_result.scalar_one_or_none()
+                if loc:
+                    location_code = loc.location_code
+            
             # Create piler items for each quantity
             for i in range(line.quantity_ordered):
                 item = piler.Item(
@@ -65,7 +78,8 @@ async def process_single_order(order_id: int, db: AsyncSession) -> Optional[str]
                     weight=float(product.weight_kg),
                     allow_tipping=not product.requires_upright,
                     is_fragile=product.is_fragile,
-                    type_id=product.sku  # <--- EXPLICITLY PASS SKU TO FIX TOWER BUG
+                    type_id=product.sku,
+                    location=location_code
                 )
                 all_items.append(item)
             
@@ -74,6 +88,12 @@ async def process_single_order(order_id: int, db: AsyncSession) -> Optional[str]
         if not all_items:
             logger.error(f"No items to pack for order {order.order_number}")
             return None
+        
+        # Assign picking_order based on warehouse location (A-01-01 = bottom, higher = top)
+        unique_locations = sorted(set(item.location for item in all_items))
+        location_to_order = {loc: idx + 1 for idx, loc in enumerate(unique_locations)}
+        for item in all_items:
+            item.picking_order = location_to_order.get(item.location, 1)
         
         total_items = len(all_items)
         logger.info(f"  Total items to pack: {total_items}")
@@ -142,6 +162,19 @@ async def process_all_new_orders():
                             select(Product).where(Product.product_id == line.product_id)
                         ).first()
                         
+                        # Look up the warehouse location for this product
+                        inventory = session.exec(
+                            select(Inventory).where(Inventory.product_id == product.product_id)
+                        ).first()
+                        
+                        location_code = ""
+                        if inventory:
+                            loc = session.exec(
+                                select(Location).where(Location.location_id == inventory.location_id)
+                            ).first()
+                            if loc:
+                                location_code = loc.location_code
+                        
                         for i in range(line.quantity_ordered):
                             item = piler.Item(
                                 id=f"{product.sku}-{i}",
@@ -152,11 +185,18 @@ async def process_all_new_orders():
                                 weight=float(product.weight_kg),
                                 allow_tipping=not product.requires_upright,
                                 is_fragile=product.is_fragile,
-                                type_id=product.sku  # <--- EXPLICITLY PASS SKU HERE TOO
+                                type_id=product.sku,
+                                location=location_code
                             )
                             all_items.append(item)
                         
                         print(f"   - Found {line.quantity_ordered}x {product.name}")
+                    
+                    # Assign picking_order based on warehouse location
+                    unique_locations = sorted(set(item.location for item in all_items))
+                    location_to_order = {loc: idx + 1 for idx, loc in enumerate(unique_locations)}
+                    for item in all_items:
+                        item.picking_order = location_to_order.get(item.location, 1)
                     
                     total_items = len(all_items)
                     print(f"  Total items to pack: {total_items}")

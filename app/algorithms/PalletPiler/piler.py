@@ -4,8 +4,8 @@ import os
 
 # --- 1. DATA STRUCTURE ---
 class Item:
-    # UPDATED: Added type_id as an optional argument
-    def __init__(self, id, name, w, d, h, weight, picking_order=1, allow_tipping=True, is_fragile=False, type_id=None):
+    # UPDATED: Added type_id and location as optional arguments
+    def __init__(self, id, name, w, d, h, weight, picking_order=1, allow_tipping=True, is_fragile=False, type_id=None, location=""):
         self.id = str(id)
         self.name = name
         self.w = w
@@ -19,6 +19,7 @@ class Item:
         self.picking_order = picking_order
         self.allow_tipping = allow_tipping
         self.is_fragile = is_fragile
+        self.location = location
         
         # FIX: Prefer explicit type_id, otherwise handle dashes correctly
         if type_id:
@@ -32,14 +33,15 @@ def solve_single_pallet(items, pallet_w, pallet_d, pallet_h,
                         gravity_weight=150, 
                         corner_weight=2, 
                         clustering_weight=1, 
-                        max_z_penalty=4580):
+                        max_z_penalty=4580,
+                        location_weight=200):
     
     model = cp_model.CpModel()
 
     # --- CONSTANTS ---
     MAX_H_TO_BASE_RATIO = 3.0 
     OVERHANG_RATIO = 5 
-    ROTATION_PENALTY = 50
+    GAP_FILL_PENALTY = 10000   # Heavy cost to tip a box; solver only tips to fill gaps
     SAME_TYPE_STACKING_PENALTY = 1000 
 
     # --- Variables ---
@@ -61,6 +63,7 @@ def solve_single_pallet(items, pallet_w, pallet_d, pallet_h,
     last_seen_index_by_name = {}
     total_clustering_dist = 0
     total_stacking_penalty = 0
+    gap_fill = {}
 
     for i, item in enumerate(items):
         is_packed[i] = model.NewBoolVar(f'is_packed_{i}')
@@ -72,9 +75,18 @@ def solve_single_pallet(items, pallet_w, pallet_d, pallet_h,
         orientation[i] = [model.NewBoolVar(f'orient_{i}_{k}') for k in range(3)]
         model.Add(sum(orientation[i]) == 1).OnlyEnforceIf(is_packed[i])
         
-        # --- UPRIGHT CONSTRAINT ---
-        if not item.allow_tipping:
+        # --- UPRIGHT-FIRST CONSTRAINT ---
+        # All boxes stay upright (orientation[0]) by default.
+        # Tipping (orientation[1] or [2]) is only unlocked via gap_fill,
+        # which carries a heavy penalty so the solver only tips to fill gaps.
+        if item.allow_tipping:
+            gap_fill[i] = model.NewBoolVar(f'gap_fill_{i}')
+            model.Add(orientation[i][0] == 1).OnlyEnforceIf(gap_fill[i].Not())
+            model.AddImplication(gap_fill[i], is_packed[i])
+        else:
+            # Items that must never tip — always upright, gap_fill disabled
             model.Add(orientation[i][0] == 1)
+            gap_fill[i] = None
 
         # --- PHYSICS CHECKS ---
         w, d, h = item.dims
@@ -166,9 +178,11 @@ def solve_single_pallet(items, pallet_w, pallet_d, pallet_h,
 
             model.AddBoolOr([left, right, behind, front, below, above]).OnlyEnforceIf([is_packed[i], is_packed[j]])
 
-            # Weight Rule
-            if items[i].weight > items[j].weight:
+            # Location ordering: items picked first (lower picking_order) must stay below
+            if items[i].picking_order < items[j].picking_order:
                 model.Add(above == False)
+            elif items[i].picking_order > items[j].picking_order:
+                model.Add(below == False)
             
             # Fragile Rule
             if items[j].is_fragile:
@@ -214,24 +228,34 @@ def solve_single_pallet(items, pallet_w, pallet_d, pallet_h,
     volume_score = 0
     gravity_score = 0
     corner_score = 0
-    rotation_penalty = 0
+    gap_fill_total = 0
+    location_order_score = 0
+    
+    max_picking_order = max((item.picking_order for item in items), default=1)
     
     for i, item in enumerate(items):
         volume_score += (is_packed[i] * item.volume)
         gravity_score += (z[i] * gravity_weight) 
         corner_score += (x[i] + y[i]) 
 
-        if item.allow_tipping:
-             rotation_penalty += orientation[i][1] + orientation[i][2]
+        # Count gap-fill tipping (only for items that allow tipping)
+        if gap_fill[i] is not None:
+            gap_fill_total += gap_fill[i]
+        
+        # Items picked first (lower picking_order) get a stronger penalty for being high up.
+        # This encourages them to spread out horizontally and form a stable base.
+        order_factor = max_picking_order - item.picking_order + 1
+        location_order_score += z[i] * order_factor
 
     model.Maximize(
         (volume_score * 1000) 
         - (max_z * max_z_penalty) 
         - gravity_score 
         - (corner_score * corner_weight) 
-        - (rotation_penalty * ROTATION_PENALTY)
+        - (gap_fill_total * GAP_FILL_PENALTY)
         - (total_clustering_dist * clustering_weight)
         - (total_stacking_penalty * SAME_TYPE_STACKING_PENALTY) 
+        - (location_order_score * location_weight)
     )
 
     # --- SOLVE ---
@@ -251,6 +275,8 @@ def solve_single_pallet(items, pallet_w, pallet_d, pallet_h,
                     "id": item.id,
                     "name": item.name,
                     "type_id": item.type_id,
+                    "location": item.location,
+                    "picking_order": item.picking_order,
                     "x": solver.Value(x[i]),
                     "y": solver.Value(y[i]),
                     "z": solver.Value(z[i]),
@@ -272,7 +298,7 @@ def solve_single_pallet(items, pallet_w, pallet_d, pallet_h,
 
 def solve_multiple_pallets(items, pallet_w, pallet_d, pallet_h, **kwargs):
     all_pallets = []
-    items.sort(key=lambda x: (x.w * x.d, x.weight, x.name), reverse=True)
+    items.sort(key=lambda x: (x.picking_order, -(x.w * x.d), x.name))
     remaining_items = items.copy()
     pallet_number = 1
     
