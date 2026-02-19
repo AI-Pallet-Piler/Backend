@@ -12,6 +12,7 @@ from app.api.v1.endpoints.products import router as products_router
 from app.api.v1.endpoints.users import router as users_router
 from app.api.v1.endpoints.user_service_users import router as user_service_users_router
 from app.db import create_tables, get_db
+from app.services.packing_service import start_packing_service
 from app.add_initial_users import add_initial_users
 from app.add_initial_orders import create_test_data
 
@@ -21,6 +22,10 @@ async def lifespan(app: FastAPI):
     # Startup logic
     await create_tables()
     print("Database tables created successfully!")
+    
+    # Start packing service for automatic order processing
+    await start_packing_service()
+    print("Packing service started!")
     await add_initial_users()
     await create_test_data()
 
