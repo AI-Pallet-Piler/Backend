@@ -18,6 +18,7 @@ from app.models import (
     PalletItem,
     StackingRule,
     PickTask,
+    Report,
 )
 
 load_dotenv()
