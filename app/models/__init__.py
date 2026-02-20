@@ -5,6 +5,7 @@ from .models import (
     PalletStatus,
     Rotation,
     PickTaskStatus,
+    UserRole,
     # Models
     User,
     Product,

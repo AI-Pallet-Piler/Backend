@@ -62,6 +62,7 @@ class OrderResponse(SQLModel):
     status: OrderStatus
     priority: int
     created_at: datetime
+    completed_at: Optional[datetime] = None
     promised_ship_date: Optional[datetime] = None
     
     # Order lines
@@ -183,6 +184,7 @@ async def list_orders(
                 status=order.status,
                 priority=order.priority,
                 created_at=order.created_at,
+                completed_at=order.completed_at,
                 promised_ship_date=order.promised_ship_date,
                 order_lines=order_lines,
             )
@@ -251,6 +253,7 @@ async def get_order(
         status=order.status,
         priority=order.priority,
         created_at=order.created_at,
+        completed_at=order.completed_at,
         promised_ship_date=order.promised_ship_date,
         order_lines=order_lines,
     )
@@ -346,6 +349,7 @@ async def create_order(
         status=order.status,
         priority=order.priority,
         created_at=order.created_at,
+        completed_at=order.completed_at,
         promised_ship_date=order.promised_ship_date,
         order_lines=order_lines_response,
     )
@@ -378,6 +382,12 @@ async def update_order(
     if payload.customer_name is not None:
         order.customer_name = payload.customer_name
     if payload.status is not None:
+        # Track completion time when status changes to SHIPPED
+        if payload.status == OrderStatus.SHIPPED and order.status != OrderStatus.SHIPPED:
+            order.completed_at = _naive_utc_now()
+        elif payload.status != OrderStatus.SHIPPED and order.status == OrderStatus.SHIPPED:
+            # Clear completion time if reverting from SHIPPED
+            order.completed_at = None
         order.status = payload.status
     if payload.priority is not None:
         order.priority = payload.priority
@@ -425,6 +435,7 @@ async def update_order(
         status=order.status,
         priority=order.priority,
         created_at=order.created_at,
+        completed_at=order.completed_at,
         promised_ship_date=order.promised_ship_date,
         order_lines=order_lines,
     )
@@ -453,6 +464,12 @@ async def update_order_status(
             detail="Order not found",
         )
     
+    # Track completion time when status changes to SHIPPED
+    if payload.status == OrderStatus.SHIPPED and order.status != OrderStatus.SHIPPED:
+        order.completed_at = _naive_utc_now()
+    elif payload.status != OrderStatus.SHIPPED and order.status == OrderStatus.SHIPPED:
+        # Clear completion time if reverting from SHIPPED
+        order.completed_at = None
     order.status = payload.status
     
     await db.commit()
@@ -496,6 +513,7 @@ async def update_order_status(
         status=order.status,
         priority=order.priority,
         created_at=order.created_at,
+        completed_at=order.completed_at,
         promised_ship_date=order.promised_ship_date,
         order_lines=order_lines,
     )
