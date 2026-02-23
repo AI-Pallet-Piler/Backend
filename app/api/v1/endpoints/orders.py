@@ -54,6 +54,11 @@ class OrderStatusUpdate(SQLModel):
     status: OrderStatus
 
 
+class OrderLinePickedUpdate(SQLModel):
+    """Schema for updating the picked quantity of an order line."""
+    quantity_picked: int
+
+
 class OrderResponse(SQLModel):
     """Enhanced order response with order lines."""
     order_id: int
@@ -62,6 +67,7 @@ class OrderResponse(SQLModel):
     status: OrderStatus
     priority: int
     created_at: datetime
+    completed_at: Optional[datetime] = None
     promised_ship_date: Optional[datetime] = None
     
     # Order lines
@@ -183,6 +189,7 @@ async def list_orders(
                 status=order.status,
                 priority=order.priority,
                 created_at=order.created_at,
+                completed_at=order.completed_at,
                 promised_ship_date=order.promised_ship_date,
                 order_lines=order_lines,
             )
@@ -251,6 +258,7 @@ async def get_order(
         status=order.status,
         priority=order.priority,
         created_at=order.created_at,
+        completed_at=order.completed_at,
         promised_ship_date=order.promised_ship_date,
         order_lines=order_lines,
     )
@@ -346,6 +354,7 @@ async def create_order(
         status=order.status,
         priority=order.priority,
         created_at=order.created_at,
+        completed_at=order.completed_at,
         promised_ship_date=order.promised_ship_date,
         order_lines=order_lines_response,
     )
@@ -425,6 +434,7 @@ async def update_order(
         status=order.status,
         priority=order.priority,
         created_at=order.created_at,
+        completed_at=order.completed_at,
         promised_ship_date=order.promised_ship_date,
         order_lines=order_lines,
     )
@@ -454,6 +464,8 @@ async def update_order_status(
         )
     
     order.status = payload.status
+    if payload.status == OrderStatus.SHIPPED and order.completed_at is None:
+        order.completed_at = _naive_utc_now()
     
     await db.commit()
     await db.refresh(order)
@@ -496,6 +508,7 @@ async def update_order_status(
         status=order.status,
         priority=order.priority,
         created_at=order.created_at,
+        completed_at=order.completed_at,
         promised_ship_date=order.promised_ship_date,
         order_lines=order_lines,
     )
@@ -592,6 +605,67 @@ async def get_order_lines(
         )
         for row in lines_data
     ]
+
+
+@router.patch(
+    "/{order_id}/lines/{order_line_id}",
+    response_model=OrderLineResponse,
+    summary="Update order line picked quantity",
+)
+async def update_order_line_picked(
+    order_id: int,
+    order_line_id: int,
+    payload: OrderLinePickedUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> OrderLineResponse:
+    """
+    Update the quantity_picked for a specific order line.
+    Called by the picking app when a warehouse worker confirms picking an item.
+    """
+    # Verify order exists
+    order_stmt = select(Order).where(Order.order_id == order_id)
+    order_result = await db.execute(order_stmt)
+    order = order_result.scalar_one_or_none()
+
+    if order is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Order not found",
+        )
+
+    # Get the order line (must belong to this order)
+    line_stmt = (
+        select(OrderLine)
+        .where(OrderLine.order_line_id == order_line_id)
+        .where(OrderLine.order_id == order_id)
+    )
+    line_result = await db.execute(line_stmt)
+    order_line = line_result.scalar_one_or_none()
+
+    if order_line is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Order line not found",
+        )
+
+    order_line.quantity_picked = payload.quantity_picked
+    await db.commit()
+    await db.refresh(order_line)
+
+    # Fetch product details for the response
+    product_stmt = select(Product).where(Product.product_id == order_line.product_id)
+    product_result = await db.execute(product_stmt)
+    product = product_result.scalar_one_or_none()
+
+    return OrderLineResponse(
+        order_line_id=order_line.order_line_id,
+        order_id=order_line.order_id,
+        product_id=order_line.product_id,
+        quantity_ordered=order_line.quantity_ordered,
+        quantity_picked=order_line.quantity_picked,
+        product_name=product.name if product else None,
+        product_sku=product.sku if product else None,
+    )
 
 
 @router.get(
