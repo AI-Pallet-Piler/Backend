@@ -63,3 +63,10 @@ async def create_tables():
         await conn.execute(
             text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP")
         )
+
+    # ALTER TYPE ADD VALUE must run outside a transaction in PostgreSQL
+    async with engine.connect() as conn:
+        autocommit_conn = await conn.execution_options(isolation_level="AUTOCOMMIT")
+        await autocommit_conn.execute(
+            text("ALTER TYPE orderstatus ADD VALUE IF NOT EXISTS 'ready'")
+        )

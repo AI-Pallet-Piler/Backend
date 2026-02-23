@@ -128,7 +128,7 @@ async def list_orders(
         except ValueError:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid status: {status_filter}. Valid values: new, picking, packing, shipped, cancelled",
+                detail=f"Invalid status: {status_filter}. Valid values: new, ready, picking, packing, cancelled",
             )
     
     if priority is not None:
@@ -464,7 +464,7 @@ async def update_order_status(
         )
     
     order.status = payload.status
-    if payload.status == OrderStatus.SHIPPED and order.completed_at is None:
+    if payload.status == OrderStatus.PACKING and order.completed_at is None:
         order.completed_at = _naive_utc_now()
     
     await db.commit()

@@ -32,6 +32,7 @@ class LocationType(str, PyEnum):
 
 class OrderStatus(str, PyEnum):
     NEW = "new"
+    READY = "ready"
     PICKING = "picking"
     PACKING = "packing"
     SHIPPED = "shipped"
