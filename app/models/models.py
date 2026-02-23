@@ -32,6 +32,7 @@ class LocationType(str, PyEnum):
 
 class OrderStatus(str, PyEnum):
     NEW = "new"
+    READY = "ready"
     PICKING = "picking"
     PACKING = "packing"
     SHIPPED = "shipped"
@@ -138,6 +139,7 @@ class Order(SQLModel, table=True):
     status: OrderStatus = Field(default=OrderStatus.NEW, sa_column=Column(Enum(OrderStatus)))
     priority: int = Field(default=1)
     created_at: datetime = Field(default_factory=utc_now, sa_column=Column(TIMESTAMP))
+    completed_at: Optional[datetime] = Field(default=None, sa_column=Column(TIMESTAMP))
     promised_ship_date: Optional[datetime] = Field(default=None, sa_column=Column(TIMESTAMP))
 
 

@@ -1,6 +1,7 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.ext.asyncio.session import AsyncSession 
 from sqlalchemy.orm import declarative_base
+from sqlalchemy import text
 from sqlmodel import SQLModel
 import os
 from dotenv import load_dotenv
@@ -58,3 +59,14 @@ async def create_tables():
     async with engine.begin() as conn:
         # Run the sync create_all in the async context
         await conn.run_sync(lambda sync_conn: SQLModel.metadata.create_all(bind=sync_conn))
+        # Add completed_at column to orders if it doesn't exist yet (safe migration)
+        await conn.execute(
+            text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP")
+        )
+
+    # ALTER TYPE ADD VALUE must run outside a transaction in PostgreSQL
+    async with engine.connect() as conn:
+        autocommit_conn = await conn.execution_options(isolation_level="AUTOCOMMIT")
+        await autocommit_conn.execute(
+            text("ALTER TYPE orderstatus ADD VALUE IF NOT EXISTS 'ready'")
+        )
