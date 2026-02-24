@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgis/postgis:16-3.4-alpine
+    container_name: backend-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: backend
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: backend-app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/backend
+      API_URL: http://backend:8000
+      USE_DIRECT_PACKING: "true"
+      SECRET_KEY: your-secret-key-change-in-production
+      ACCESS_TOKEN_EXPIRE_MINUTES: 10080
+      JWT_ALGORITHM: HS256
+      POSTGIS_HOST: db
+      POSTGIS_PORT: 5432
+      POSTGIS_DATABASE: backend
+      POSTGIS_USER: postgres
+      POSTGIS_PASSWORD: postgres
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./app:/app/app
+
+volumes:
+  postgres_data:

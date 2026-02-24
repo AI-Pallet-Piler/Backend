@@ -17,7 +17,33 @@ async def trigger_packing_for_orders(order_ids: list[int]):
     
     Args:
         order_ids: List of order IDs to process
+    
+    Note: During container startup, use direct call instead of HTTP to avoid
+    connection issues when the server isn't fully ready yet.
     """
+    # Check if we should use direct call (for Docker startup) or HTTP API
+    use_direct = os.getenv("USE_DIRECT_PACKING", "true").lower() == "true"
+    
+    if use_direct:
+        # Direct import to avoid circular imports
+        from app.algorithms.PalletPiler.piler_adapter import process_single_order
+        from app.db import get_db
+        
+        async for db in get_db():
+            for order_id in order_ids:
+                try:
+                    print(f"   🔄 Processing order ID {order_id} directly...")
+                    result = await process_single_order(order_id, db)
+                    if result:
+                        print(f"   ✅ Order {order_id} packed successfully")
+                    else:
+                        print(f"   ⚠️  Order {order_id} packing failed")
+                except Exception as e:
+                    print(f"   ❌ Error processing order {order_id}: {str(e)}")
+            break
+        return
+    
+    # Use HTTP API call
     # Use API Gateway - use service name when inside Docker, localhost when running on host
     # Check if we're inside Docker by looking for Docker environment indicators
     api_url = os.getenv("API_URL", "http://api-gateway:8080" if os.path.exists("/.dockerenv") else "http://localhost:8080")
