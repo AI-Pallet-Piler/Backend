@@ -1,0 +1,39 @@
+# Warehouse Map Configuration
+# Demo warehouse config
+
+warehouse:
+  name: "Demo Warehouse"
+  width: 40
+  height: 30
+
+corridors:
+  width: 1.5
+  horizontal_count: 2
+  vertical_count: 2
+  spacing: 10
+  offset_x: 2
+  offset_y: 2
+  disable_horizontal_shelves: false
+  disable_vertical_shelves: false
+  horizontal_spacing: 0
+  vertical_spacing: 0
+
+shelves:
+  width: 2
+  height: 1
+  count_per_segment: 1
+  spacing: 8
+
+visualization:
+  corridor_color: "#000000"       # Black
+  shelf_color: "#0000FF"          # Blue
+  connection_color: "#808080"     # Grey
+  connection_point_color: "#FF0000"  # Red
+  show_labels: true
+
+database:
+  host: "db"
+  port: 5432
+  database: "backend"
+  user: "postgres"
+  password: "postgres"
