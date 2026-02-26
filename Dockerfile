@@ -17,7 +17,7 @@ RUN apt-get update && \
     python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements file
+# Copy requirements fileo
 COPY requirements.txt ./
 
 # Install Python dependencies

@@ -1,0 +1,18 @@
+services:
+  postgis:
+    build:
+      context: .
+      dockerfile: ../Dockerfile.postgis
+    image: postgis-pgrouting:latest
+    container_name: backend-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: backend
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgis_data:/var/lib/postgresql/data
+
+volumes:
+  postgis_data:
