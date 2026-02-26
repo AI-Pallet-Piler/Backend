@@ -63,8 +63,8 @@ app.include_router(orders_router, prefix="/api/v1")
 app.include_router(products_router, prefix="/api/v1")
 app.include_router(reports_router, prefix="/api/v1")
 app.include_router(users_router, prefix="/api/v1")
-app.include_router(auth_router, prefix="/api")
-app.include_router(user_service_users_router, prefix="/api")
+app.include_router(auth_router, prefix="/api/v1")
+app.include_router(user_service_users_router, prefix="/api/v1")
 
 
 @app.get("/")
