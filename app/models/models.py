@@ -5,7 +5,7 @@ from enum import Enum as PyEnum
 
 from sqlmodel import Field, SQLModel, Column, Index, Relationship
 from sqlalchemy import Enum, DECIMAL, TIMESTAMP, func
-from sqlalchemy.dialects.postgresql import BYTEA
+from sqlalchemy.dialects.postgresql import BYTEA, TEXT
 
 
 # Helper function for UTC timestamp default
@@ -228,7 +228,7 @@ class Corridor(SQLModel, table=True):
     
     corridor_id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(max_length=255)
-    coordinates: Optional[bytes] = Field(default=None, sa_column=Column(BYTEA))  # PostGIS geometry (WKB)
+    coordinates: Optional[str] = Field(default=None, sa_column=Column(TEXT))  # PostGIS geometry (WKT)
     created_at: datetime = Field(default_factory=utc_now, sa_column=Column(TIMESTAMP))
     
     # Relationships
@@ -242,7 +242,7 @@ class Shelf(SQLModel, table=True):
     
     shelf_id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(max_length=255)
-    coordinates: Optional[bytes] = Field(default=None, sa_column=Column(BYTEA))  # PostGIS geometry (WKB)
+    coordinates: Optional[str] = Field(default=None, sa_column=Column(TEXT))  # PostGIS geometry (WKT)
     created_at: datetime = Field(default_factory=utc_now, sa_column=Column(TIMESTAMP))
     
     # Relationships
@@ -257,7 +257,7 @@ class ConnectionPoint(SQLModel, table=True):
     point_id: Optional[int] = Field(default=None, primary_key=True)
     connection_point_id: int
     corridor_id: Optional[int] = Field(default=None, foreign_key="corridors.corridor_id")
-    connection_point_coordinates: Optional[bytes] = Field(default=None, sa_column=Column(BYTEA))  # PostGIS geometry (WKB)
+    connection_point_coordinates: Optional[str] = Field(default=None, sa_column=Column(TEXT))  # PostGIS geometry (WKT)
     created_at: datetime = Field(default_factory=utc_now, sa_column=Column(TIMESTAMP))
     
     # Relationships
@@ -272,7 +272,7 @@ class Connection(SQLModel, table=True):
     shelf_id: Optional[int] = Field(default=None, foreign_key="shelves.shelf_id")
     corridor_id: Optional[int] = Field(default=None, foreign_key="corridors.corridor_id")
     connection_point_id: Optional[int] = Field(default=None)
-    connection_coordinates: Optional[bytes] = Field(default=None, sa_column=Column(BYTEA))  # PostGIS geometry (WKB)
+    connection_coordinates: Optional[str] = Field(default=None, sa_column=Column(TEXT))  # PostGIS geometry (WKT)
     created_at: datetime = Field(default_factory=utc_now, sa_column=Column(TIMESTAMP))
     
     # Relationships
@@ -288,7 +288,7 @@ class ShelfPath(SQLModel, table=True):
     from_shelf_id: int = Field(foreign_key="shelves.shelf_id")
     to_shelf_id: int = Field(foreign_key="shelves.shelf_id")
     total_distance: float  # Total path distance
-    path_coordinates: Optional[bytes] = Field(default=None, sa_column=Column(BYTEA))  # WKB of the path linestring
+    path_coordinates: Optional[str] = Field(default=None, sa_column=Column(TEXT))  # WKT of the path linestring
     num_segments: int  # Number of path segments
     created_at: datetime = Field(default_factory=utc_now, sa_column=Column(TIMESTAMP))
     

@@ -9,6 +9,12 @@ from shapely.geometry import Point, LineString
 from app.models.models import Shelf, Connection, ConnectionPoint
 
 
+def wkt_to_geometry(wkt_string: str):
+    """Convert WKT string to Shapely geometry."""
+    geometry = shapely.wkt.loads(wkt_string)
+    return geometry.wkt
+
+
 class RoutingService:
     """Service for finding shortest paths between shelves using corridor network."""
     
@@ -27,27 +33,21 @@ class RoutingService:
         
         graph = defaultdict(list)
         
-        # Create a mapping of connection points
+        # Create a mapping of connection points by ID
         cp_by_id = {}
         for cp in connection_points:
             if cp.connection_point_coordinates:
-                geom = shapely.wkb.loads(cp.connection_point_coordinates)
+                geom = shapely.wkt.loads(cp.connection_point_coordinates)
                 cp_by_id[cp.connection_point_id] = (geom.x, geom.y)
         
         # Get all connection point coordinates that are on corridors
         corridor_nodes = set(cp_by_id.values())
         
-        # Add intermediate points along corridors for more granular routing
-        # We'll use the connection points as nodes and interpolate between them
-        
-        # Build graph edges from connection points
-        # Each connection point connects to its shelf
-        
         # First, add shelf centroids as nodes
         shelf_centroids = {}
         for shelf in shelves:
             if shelf.coordinates:
-                geom = shapely.wkb.loads(shelf.coordinates)
+                geom = shapely.wkt.loads(shelf.coordinates)
                 centroid = geom.centroid
                 shelf_centroids[shelf.shelf_id] = (centroid.x, centroid.y)
         
@@ -62,15 +62,11 @@ class RoutingService:
                 graph[shelf_coord].append((cp_coord[0], cp_coord[1], dist))
                 graph[cp_coord].append((shelf_coord[0], shelf_coord[1], dist))
         
-        # Now we need to add edges between connection points via corridors
-        # This is a simplified version - in a real app we'd analyze corridor geometry
-        # For now, we'll create a mesh between connection points on the same corridor
-        
         # Group connection points by corridor
         cp_by_corridor = defaultdict(list)
         for cp in connection_points:
             if cp.corridor_id and cp.connection_point_coordinates:
-                geom = shapely.wkb.loads(cp.connection_point_coordinates)
+                geom = shapely.wkt.loads(cp.connection_point_coordinates)
                 cp_by_corridor[cp.corridor_id].append((geom.x, geom.y))
         
         # Add edges between consecutive connection points on same corridor
@@ -85,6 +81,66 @@ class RoutingService:
                 # Add bidirectional edge
                 graph[p1].append((p2[0], p2[1], dist))
                 graph[p2].append((p1[0], p1[1], dist))
+        
+        # Identify horizontal vs vertical corridors based on their connection points
+        horizontal_corridors = set()
+        vertical_corridors = set()
+        
+        for corr_id, coords in cp_by_corridor.items():
+            if len(coords) >= 2:
+                x_vals = [c[0] for c in coords]
+                y_vals = [c[1] for c in coords]
+                x_range = max(x_vals) - min(x_vals)
+                y_range = max(y_vals) - min(y_vals)
+                # If x range is much smaller than y range, it's vertical
+                # If y range is much smaller than x range, it's horizontal
+                if x_range < 1.0 and y_range > 1.0:
+                    vertical_corridors.add(corr_id)
+                elif y_range < 1.0 and x_range > 1.0:
+                    horizontal_corridors.add(corr_id)
+                elif x_range < 1.0:
+                    vertical_corridors.add(corr_id)
+                elif y_range < 1.0:
+                    horizontal_corridors.add(corr_id)
+        
+        # Find intersections between horizontal and vertical corridors
+        # For each horizontal corridor, find the y value (constant)
+        # For each vertical corridor, find the x value (constant)
+        # The intersection is at (vertical_x, horizontal_y)
+        
+        for h_corr_id in horizontal_corridors:
+            h_coords = cp_by_corridor[h_corr_id]
+            if not h_coords:
+                continue
+            # Get the constant y value for horizontal corridor
+            h_y = h_coords[0][1]
+            
+            for v_corr_id in vertical_corridors:
+                v_coords = cp_by_corridor[v_corr_id]
+                if not v_coords:
+                    continue
+                # Get the constant x value for vertical corridor
+                v_x = v_coords[0][0]
+                
+                # Create intersection point
+                intersection_coord = (v_x, h_y)
+                
+                # Connect this intersection to all connection points on both corridors
+                # This creates a fully connected graph
+                
+                # Connect to horizontal corridor points
+                for cp_coord in h_coords:
+                    dist = ((intersection_coord[0] - cp_coord[0])**2 + (intersection_coord[1] - cp_coord[1])**2)**0.5
+                    if dist > 0.1:  # Don't connect to itself
+                        graph[intersection_coord].append((cp_coord[0], cp_coord[1], dist))
+                        graph[cp_coord].append((intersection_coord[0], intersection_coord[1], dist))
+                
+                # Connect to vertical corridor points
+                for cp_coord in v_coords:
+                    dist = ((intersection_coord[0] - cp_coord[0])**2 + (intersection_coord[1] - cp_coord[1])**2)**0.5
+                    if dist > 0.1:  # Don't connect to itself
+                        graph[intersection_coord].append((cp_coord[0], cp_coord[1], dist))
+                        graph[cp_coord].append((intersection_coord[0], intersection_coord[1], dist))
         
         self.graph = graph
         return graph
@@ -163,7 +219,7 @@ class RoutingService:
         shelf_centroids = {}
         for shelf in shelves:
             if shelf.coordinates:
-                geom = shapely.wkb.loads(shelf.coordinates)
+                geom = shapely.wkt.loads(shelf.coordinates)
                 centroid = geom.centroid
                 shelf_centroids[shelf.shelf_id] = (centroid.x, centroid.y)
         
@@ -199,7 +255,8 @@ class RoutingService:
             "from_shelf_id": from_shelf_id,
             "to_shelf_id": to_shelf_id,
             "total_distance": total_distance,
-            "path_coordinates": path_geom.wkb,  # Store as WKB
+            "path_coordinates": path_geom.wkt,  # Store as WKT
+            "path_coordinates_wkt": path_geom.wkt,  # WKT representation
             "num_segments": len(path_coords) - 1,
             "path_geometry": path_coords  # For JSON response
         }

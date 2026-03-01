@@ -202,14 +202,14 @@ class WarehouseGenerator:
             if is_horizontal:
                 shelves.extend(
                     self._place_shelves_on_horizontal_corridor(
-                        corridor, shelf_id, config, combined_corridors
+                        corridor, shelf_id, config, combined_corridors, shelves
                     )
                 )
                 shelf_id = len(shelves) + 1
             else:
                 shelves.extend(
                     self._place_shelves_on_vertical_corridor(
-                        corridor, shelf_id, config, combined_corridors
+                        corridor, shelf_id, config, combined_corridors, shelves
                     )
                 )
                 shelf_id = len(shelves) + 1
@@ -221,7 +221,8 @@ class WarehouseGenerator:
         corridor: dict, 
         start_id: int,
         config: ShelfConfig,
-        combined_corridors
+        combined_corridors,
+        existing_shelves: list
     ) -> List[dict]:
         """Place shelves along a horizontal corridor."""
         shelves = []
@@ -232,7 +233,7 @@ class WarehouseGenerator:
         spacing = config.spacing
         
         for side in [-1, 1]:
-            shelf_y = y + (side * spacing / 2)
+            shelf_y = y + (side * (spacing / 2 + config.height / 2 + 0.5))  # Add half height + gap to prevent overlap
             
             x = spacing
             while x < x_max - config.width:
@@ -245,13 +246,21 @@ class WarehouseGenerator:
                 elif (0 <= polygon.bounds[0] and polygon.bounds[2] <= self.config.warehouse.width and 
                       0 <= polygon.bounds[1] and polygon.bounds[3] <= self.config.warehouse.height):
                     
-                    shelf = {
-                        "shelf_id": shelf_id,
-                        "name": f"Shelf {shelf_id}",
-                        "coordinates": polygon
-                    }
-                    shelves.append(shelf)
-                    shelf_id += 1
+                    # Check for overlap with existing shelves
+                    overlaps = False
+                    for existing in existing_shelves:
+                        if polygon.intersects(existing["coordinates"]):
+                            overlaps = True
+                            break
+                    
+                    if not overlaps:
+                        shelf = {
+                            "shelf_id": shelf_id,
+                            "name": f"Shelf {shelf_id}",
+                            "coordinates": polygon
+                        }
+                        shelves.append(shelf)
+                        shelf_id += 1
                 
                 x += spacing
         
@@ -262,7 +271,8 @@ class WarehouseGenerator:
         corridor: dict, 
         start_id: int,
         config: ShelfConfig,
-        combined_corridors
+        combined_corridors,
+        existing_shelves: list
     ) -> List[dict]:
         """Place shelves along a vertical corridor."""
         shelves = []
@@ -273,7 +283,7 @@ class WarehouseGenerator:
         spacing = config.spacing
         
         for side in [-1, 1]:
-            shelf_x = x + (side * spacing / 2)
+            shelf_x = x + (side * (spacing / 2 + config.width / 2 + 0.5))  # Add half width + gap to prevent overlap
             
             y = spacing
             while y < y_max - config.height:
@@ -286,13 +296,21 @@ class WarehouseGenerator:
                 elif (0 <= polygon.bounds[0] and polygon.bounds[2] <= self.config.warehouse.width and 
                       0 <= polygon.bounds[1] and polygon.bounds[3] <= self.config.warehouse.height):
                     
-                    shelf = {
-                        "shelf_id": shelf_id,
-                        "name": f"Shelf {shelf_id}",
-                        "coordinates": polygon
-                    }
-                    shelves.append(shelf)
-                    shelf_id += 1
+                    # Check for overlap with existing shelves
+                    overlaps = False
+                    for existing in existing_shelves:
+                        if polygon.intersects(existing["coordinates"]):
+                            overlaps = True
+                            break
+                    
+                    if not overlaps:
+                        shelf = {
+                            "shelf_id": shelf_id,
+                            "name": f"Shelf {shelf_id}",
+                            "coordinates": polygon
+                        }
+                        shelves.append(shelf)
+                        shelf_id += 1
                 
                 y += spacing
         
@@ -303,7 +321,10 @@ class WarehouseGenerator:
         shelves: List[dict],
         corridors: List[dict]
     ) -> dict:
-        """Create connections from shelves to nearest corridor points."""
+        """Create connections from shelves to nearest corridor points.
+        
+        Also creates intersection connection points to ensure all corridors are connected.
+        """
         connections = []
         connection_points = []
         connection_id = 1
@@ -312,6 +333,11 @@ class WarehouseGenerator:
         # Build a single geometry from all corridors for nearest point calculation
         corridor_geometries = [c["coordinates"] for c in corridors]
         combined_corridors = unary_union(corridor_geometries)
+        
+        # First, add corridor intersection points to connect horizontal and vertical corridors
+        intersection_points = self._create_corridor_intersections(corridors, point_id)
+        connection_points.extend(intersection_points)
+        point_id += len(intersection_points)
         
         for shelf in shelves:
             shelf_geom = shelf["coordinates"]
@@ -352,6 +378,82 @@ class WarehouseGenerator:
             "connections": connections,
             "connection_points": connection_points
         }
+    
+    def _create_corridor_intersections(
+        self, 
+        corridors: List[dict],
+        start_point_id: int
+    ) -> List[dict]:
+        """Create connection points at corridor intersections to ensure connectivity.
+        
+        This adds points where horizontal and vertical corridors cross,
+        allowing paths to traverse between different corridor types.
+        """
+        intersection_points = []
+        
+        # Separate horizontal and vertical corridors
+        horizontal_corridors = []
+        vertical_corridors = []
+        
+        for corridor in corridors:
+            coords = corridor["coordinates"]
+            if hasattr(coords, 'coords'):
+                x_coords = [c[0] for c in coords.coords]
+                y_coords = [c[1] for c in coords.coords]
+                # If x coordinates are the same, it's vertical; if y coordinates are same, it's horizontal
+                if len(set(x_coords)) == 1:
+                    vertical_corridors.append(corridor)
+                elif len(set(y_coords)) == 1:
+                    horizontal_corridors.append(corridor)
+        
+        # Find intersections between horizontal and vertical corridors
+        point_id = start_point_id
+        for h_corr in horizontal_corridors:
+            for v_corr in vertical_corridors:
+                # Get the line coordinates
+                h_coords = list(h_corr["coordinates"].coords)
+                v_coords = list(v_corr["coordinates"].coords)
+                
+                # Find intersection point (where vertical x meets horizontal y)
+                v_x = v_coords[0][0]  # X coordinate of vertical corridor
+                h_y = h_coords[0][1]  # Y coordinate of horizontal corridor
+                
+                # Check if this intersection is within corridor bounds
+                h_min_x = min(c[0] for c in h_coords)
+                h_max_x = max(c[0] for c in h_coords)
+                v_min_y = min(c[1] for c in v_coords)
+                v_max_y = max(c[1] for c in v_coords)
+                
+                if h_min_x <= v_x <= h_max_x and v_min_y <= h_y <= v_max_y:
+                    intersection_point = Point(v_x, h_y)
+                    
+                    # Check if this intersection already exists (within small tolerance)
+                    exists = False
+                    for existing in intersection_points:
+                        if existing["coordinates"].distance(intersection_point) < 0.1:
+                            # Add this corridor to the intersection's connected corridors
+                            if "connected_corridor_ids" not in existing:
+                                existing["connected_corridor_ids"] = []
+                            if v_corr["corridor_id"] not in existing["connected_corridor_ids"]:
+                                existing["connected_corridor_ids"].append(v_corr["corridor_id"])
+                            if h_corr["corridor_id"] not in existing["connected_corridor_ids"]:
+                                existing["connected_corridor_ids"].append(h_corr["corridor_id"])
+                            exists = True
+                            break
+                    
+                    if not exists:
+                        # Mark intersection as connected to BOTH horizontal and vertical corridors
+                        intersection_points.append({
+                            "point_id": point_id,
+                            "connection_point_id": point_id,
+                            "coordinates": intersection_point,
+                            "corridor_id": h_corr["corridor_id"],  # Primary corridor
+                            "connected_corridor_ids": [h_corr["corridor_id"], v_corr["corridor_id"]],
+                            "is_intersection": True
+                        })
+                        point_id += 1
+        
+        return intersection_points
     
     def _find_nearest_corridor_id(self, corridors: List[dict], point: Point) -> int:
         """Find the nearest corridor to a given point."""

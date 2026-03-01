@@ -50,3 +50,5 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+app/algorithms/PalletPiler/Pallets_Json/

@@ -3,9 +3,10 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio.session import AsyncSession
 from sqlalchemy import select, text
+from sqlalchemy.dialects.postgresql import insert
 from typing import List, Optional
 import shapely
-import shapely.wkb
+import shapely.wkt
 
 from app.db import get_db
 from app.models.models import Corridor, Shelf, Connection, ConnectionPoint, Location, LocationType
@@ -15,6 +16,10 @@ from app.navigation.config import Config, DatabaseConfig, load_config
 
 router = APIRouter(prefix="/navigation", tags=["navigation"])
 
+
+def wkb_to_wkt(wkt_string: Optional[str]) -> Optional[str]:
+    """Convert WKT string (already in WKT format, just return it)."""
+    return wkt_string
 
 @router.post("/generate")
 async def generate_warehouse_map(
@@ -235,16 +240,21 @@ async def get_location_shelf(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _get_geojson_geometry(wkb_bytes: Optional[bytes]) -> Optional[dict]:
-    """Convert WKB bytes to GeoJSON geometry."""
-    if not wkb_bytes:
+def _get_geojson_geometry(wkt_string: Optional[str]) -> Optional[dict]:
+    """Convert WKT string to GeoJSON geometry."""
+    if not wkt_string:
         return None
     
     try:
-        geom = shapely.wkb.loads(wkb_bytes)
+        geom = shapely.wkt.loads(wkt_string)
         return geom.__geo_interface__
     except Exception:
         return None
+
+
+def _get_wkt(wkt_string: Optional[str]) -> Optional[str]:
+    """Convert WKT string (already in WKT format, just return it)."""
+    return wkt_string
 
 
 @router.post("/generate-and-sync")
@@ -291,7 +301,7 @@ async def generate_and_sync(
                 if shelf.coordinates is None:
                     continue
                 
-                shelf_geom = shapely.wkb.loads(shelf.coordinates)
+                shelf_geom = shapely.wkt.loads(shelf.coordinates)
                 centroid = shelf_geom.centroid
                 
                 location = Location(
@@ -393,7 +403,7 @@ async def _sync_locations_with_shelves(db: AsyncSession) -> int:
             if shelf.coordinates is None:
                 continue
             
-            shelf_geom = shapely.wkb.loads(shelf.coordinates)
+            shelf_geom = shapely.wkt.loads(shelf.coordinates)
             distance = loc_point.distance(shelf_geom)
             
             if distance < best_distance:
@@ -415,7 +425,8 @@ async def generate_all_paths(
 ):
     """Generate and save all shelf-to-shelf paths.
     
-    This calculates shortest paths between all shelf combinations and stores them in the database.
+    Iterates through all n*(n-1) combinations and calculates each path on-demand,
+    saving to DB using upsert (update if exists, insert if not).
     """
     try:
         # Get all shelves, connections, and connection points
@@ -434,33 +445,63 @@ async def generate_all_paths(
                 detail="Warehouse map not found. Generate map first using /generate-and-sync"
             )
         
+        # Get shelf IDs
+        shelf_ids = [s.shelf_id for s in shelves if s.coordinates]
+        
         # Import routing service
-        from app.navigation.routing import generate_all_paths
-        
-        # Generate all paths
-        paths = generate_all_paths(shelves, connections, connection_points)
-        
-        # Clear existing paths
-        await db.execute(text("DELETE FROM shelf_paths;"))
-        
-        # Save paths to database
+        from app.navigation.routing import RoutingService
         from app.models.models import ShelfPath
-        for path_data in paths:
-            shelf_path = ShelfPath(
-                from_shelf_id=path_data["from_shelf_id"],
-                to_shelf_id=path_data["to_shelf_id"],
-                total_distance=path_data["total_distance"],
-                path_coordinates=path_data["path_coordinates"],
-                num_segments=path_data["num_segments"]
-            )
-            db.add(shelf_path)
+        from sqlalchemy.dialects.postgresql import insert
+        
+        routing_service = RoutingService()
+        paths_generated = 0
+        paths_failed = 0
+        
+        # Iterate through all ordered combinations (n * (n-1))
+        for from_id in shelf_ids:
+            for to_id in shelf_ids:
+                if from_id == to_id:
+                    continue  # Skip self-to-self
+                
+                # Calculate path
+                path_result = routing_service.find_path_between_shelves(
+                    from_id, to_id, shelves, connections, connection_points
+                )
+                
+                if not path_result:
+                    paths_failed += 1
+                    continue
+                
+                # Upsert path to database
+                stmt = insert(ShelfPath).values(
+                    from_shelf_id=from_id,
+                    to_shelf_id=to_id,
+                    total_distance=path_result["total_distance"],
+                    path_coordinates=path_result["path_coordinates"],
+                    num_segments=path_result["num_segments"]
+                )
+                
+                # On conflict, update the existing record
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["from_shelf_id", "to_shelf_id"],
+                    set_={
+                        "total_distance": path_result["total_distance"],
+                        "path_coordinates": path_result["path_coordinates"],
+                        "num_segments": path_result["num_segments"],
+                        "created_at": text("NOW()")
+                    }
+                )
+                
+                await db.execute(stmt)
+                paths_generated += 1
         
         await db.commit()
         
         return {
             "status": "success",
-            "message": f"Generated and saved {len(paths)} paths",
-            "path_count": len(paths)
+            "message": f"Generated {paths_generated} paths ({paths_failed} failed)",
+            "paths_generated": paths_generated,
+            "paths_failed": paths_failed
         }
     except HTTPException:
         raise
@@ -474,7 +515,111 @@ async def get_path(
     to_shelf_id: int,
     db: AsyncSession = Depends(get_db)
 ):
-    """Get the pre-calculated path between two shelves.
+    """Get path between two shelves. If not in DB, creates it on-demand."""
+    try:
+        from app.models.models import ShelfPath, Shelf, Connection, ConnectionPoint
+        from app.navigation.routing import RoutingService
+        from sqlalchemy import select
+        import shapely.wkb
+        
+        # First try to find the path in database
+        result = await db.execute(
+            select(ShelfPath).where(
+                ShelfPath.from_shelf_id == from_shelf_id,
+                ShelfPath.to_shelf_id == to_shelf_id
+            )
+        )
+        path = result.scalar_one_or_none()
+        
+        # If path exists, return it
+        if path:
+            geometry = _get_geojson_geometry(path.path_coordinates)
+            wkt = _get_wkt(path.path_coordinates)
+            return {
+                "from_shelf_id": path.from_shelf_id,
+                "to_shelf_id": path.to_shelf_id,
+                "total_distance": path.total_distance,
+                "num_segments": path.num_segments,
+                "geometry": geometry,
+                "wkt": wkt,
+                "cached": True
+            }
+        
+        # Path not found - calculate on-demand
+        result = await db.execute(select(Shelf))
+        shelves = result.scalars().all()
+        
+        result = await db.execute(select(Connection))
+        connections = result.scalars().all()
+        
+        result = await db.execute(select(ConnectionPoint))
+        connection_points = result.scalars().all()
+        
+        # Calculate path
+        routing_service = RoutingService()
+        path_result = routing_service.find_path_between_shelves(
+            from_shelf_id, to_shelf_id, shelves, connections, connection_points
+        )
+        
+        if not path_result:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No path found from shelf {from_shelf_id} to {to_shelf_id}"
+            )
+        
+        # Save to database (upsert)
+        from sqlalchemy.dialects.postgresql import insert
+        from app.models.models import ShelfPath
+        
+        stmt = insert(ShelfPath).values(
+            from_shelf_id=from_shelf_id,
+            to_shelf_id=to_shelf_id,
+            total_distance=path_result["total_distance"],
+            path_coordinates=path_result["path_coordinates"],
+            num_segments=path_result["num_segments"]
+        )
+        
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["from_shelf_id", "to_shelf_id"],
+            set_={
+                "total_distance": path_result["total_distance"],
+                "path_coordinates": path_result["path_coordinates"],
+                "num_segments": path_result["num_segments"],
+                "created_at": text("NOW()")
+            }
+        )
+        
+        await db.execute(stmt)
+        await db.commit()
+        
+        geometry = _get_geojson_geometry(path_result["path_coordinates"])
+        
+        return {
+            "from_shelf_id": from_shelf_id,
+            "to_shelf_id": to_shelf_id,
+            "total_distance": path_result["total_distance"],
+            "num_segments": path_result["num_segments"],
+            "geometry": geometry,
+            "wkt": path_result.get("path_coordinates_wkt"),
+            "cached": False
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/path/{from_shelf_id}/{to_shelf_id}")
+async def get_path(
+    from_shelf_id: int,
+    to_shelf_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    """Get or create the path between two shelves.
+    
+    If path exists in database, returns it.
+    If not, calculates on-demand, saves to DB (upsert), and returns it.
     
     Args:
         from_shelf_id: Starting shelf ID
@@ -484,9 +629,12 @@ async def get_path(
         Path geometry and distance information
     """
     try:
-        from app.models.models import ShelfPath
+        from app.models.models import ShelfPath, Shelf, Connection, ConnectionPoint
+        from app.navigation.routing import RoutingService
+        from sqlalchemy import select
+        import shapely.wkb
         
-        # Try to find the path in database
+        # First try to find the path in database
         result = await db.execute(
             select(ShelfPath).where(
                 ShelfPath.from_shelf_id == from_shelf_id,
@@ -495,22 +643,82 @@ async def get_path(
         )
         path = result.scalar_one_or_none()
         
-        if not path:
+        # If path exists, return it
+        if path:
+            geometry = _get_geojson_geometry(path.path_coordinates)
+            wkt = _get_wkt(path.path_coordinates)
+            return {
+                "from_shelf_id": path.from_shelf_id,
+                "to_shelf_id": path.to_shelf_id,
+                "total_distance": path.total_distance,
+                "num_segments": path.num_segments,
+                "geometry": geometry,
+                "wkt": wkt,
+                "cached": True
+            }
+        
+        # Path not found - calculate on-demand
+        # Get shelves, connections, and connection points
+        result = await db.execute(select(Shelf))
+        shelves = result.scalars().all()
+        
+        result = await db.execute(select(Connection))
+        connections = result.scalars().all()
+        
+        result = await db.execute(select(ConnectionPoint))
+        connection_points = result.scalars().all()
+        
+        # Calculate path
+        routing_service = RoutingService()
+        path_result = routing_service.find_path_between_shelves(
+            from_shelf_id, to_shelf_id, shelves, connections, connection_points
+        )
+        
+        if not path_result:
             raise HTTPException(
                 status_code=404,
-                detail=f"Path not found from shelf {from_shelf_id} to {to_shelf_id}. Generate paths first using /generate-paths"
+                detail=f"No path found from shelf {from_shelf_id} to {to_shelf_id}"
             )
         
+        # Save to database (upsert - update if exists, insert if not)
+        from sqlalchemy.dialects.postgresql import insert
+        from app.models.models import ShelfPath
+        
+        stmt = insert(ShelfPath).values(
+            from_shelf_id=from_shelf_id,
+            to_shelf_id=to_shelf_id,
+            total_distance=path_result["total_distance"],
+            path_coordinates=path_result["path_coordinates"],
+            num_segments=path_result["num_segments"]
+        )
+        
+        # On conflict, update the existing record
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["from_shelf_id", "to_shelf_id"],
+            set_={
+                "total_distance": path_result["total_distance"],
+                "path_coordinates": path_result["path_coordinates"],
+                "num_segments": path_result["num_segments"],
+                "created_at": text("NOW()")
+            }
+        )
+        
+        await db.execute(stmt)
+        await db.commit()
+        
         # Convert path coordinates to GeoJSON
-        geometry = _get_geojson_geometry(path.path_coordinates)
+        geometry = _get_geojson_geometry(path_result["path_coordinates"])
         
         return {
-            "from_shelf_id": path.from_shelf_id,
-            "to_shelf_id": path.to_shelf_id,
-            "total_distance": path.total_distance,
-            "num_segments": path.num_segments,
-            "geometry": geometry
+            "from_shelf_id": from_shelf_id,
+            "to_shelf_id": to_shelf_id,
+            "total_distance": path_result["total_distance"],
+            "num_segments": path_result["num_segments"],
+            "geometry": geometry,
+            "wkt": path_result.get("path_coordinates_wkt"),
+            "cached": False
         }
+        
     except HTTPException:
         raise
     except Exception as e:
@@ -589,3 +797,106 @@ async def get_path_between_locations(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/debug-graph")
+async def debug_graph(
+    db: AsyncSession = Depends(get_db)
+):
+    """Debug endpoint to check graph connectivity."""
+    try:
+        from app.navigation.routing import RoutingService
+        from sqlalchemy import select
+        import shapely.wkt
+        
+        # Get all data
+        result = await db.execute(select(Shelf))
+        shelves = result.scalars().all()
+        
+        result = await db.execute(select(Connection))
+        connections = result.scalars().all()
+        
+        result = await db.execute(select(ConnectionPoint))
+        connection_points = result.scalars().all()
+        
+        # Build graph
+        routing_service = RoutingService()
+        graph = routing_service.build_graph(shelves, connections, connection_points)
+        
+        # Analyze corridors
+        corridor_id_to_cps = {}
+        for cp in connection_points:
+            if cp.corridor_id and cp.connection_point_coordinates:
+                geom = shapely.wkt.loads(cp.connection_point_coordinates)
+                if cp.corridor_id not in corridor_id_to_cps:
+                    corridor_id_to_cps[cp.corridor_id] = []
+                corridor_id_to_cps[cp.corridor_id].append((geom.x, geom.y))
+        
+        horizontal = set()
+        vertical = set()
+        for corr_id, coords in corridor_id_to_cps.items():
+            if len(coords) >= 2:
+                x_vals = [c[0] for c in coords]
+                y_vals = [c[1] for c in coords]
+                if max(x_vals) - min(x_vals) < 1.0:
+                    vertical.add(corr_id)
+                elif max(y_vals) - min(y_vals) < 1.0:
+                    horizontal.add(corr_id)
+        
+        # Get shelf centroids
+        shelf_centroids = {}
+        for shelf in shelves:
+            if shelf.coordinates:
+                geom = shapely.wkt.loads(shelf.coordinates)
+                shelf_centroids[shelf.shelf_id] = (geom.centroid.x, geom.centroid.y)
+        
+        # Check if shelves 1 and 5 exist and their positions
+        shelf_1_corr = None
+        shelf_5_corr = None
+        for conn in connections:
+            if conn.shelf_id == 1 and conn.connection_point_id:
+                for cp in connection_points:
+                    if cp.connection_point_id == conn.connection_point_id:
+                        shelf_1_corr = cp.corridor_id
+                        break
+            if conn.shelf_id == 5 and conn.connection_point_id:
+                for cp in connection_points:
+                    if cp.connection_point_id == conn.connection_point_id:
+                        shelf_5_corr = cp.corridor_id
+                        break
+        
+        # Get shelf coordinates
+        shelf_1_coord = shelf_centroids.get(1)
+        shelf_5_coord = shelf_centroids.get(5)
+        
+        # Check neighbors in graph
+        shelf_1_neighbors = []
+        shelf_5_neighbors = []
+        if shelf_1_coord and shelf_1_coord in graph:
+            shelf_1_neighbors = [(n[0], n[1], n[2]) for n in graph[shelf_1_coord]]
+        if shelf_5_coord and shelf_5_coord in graph:
+            shelf_5_neighbors = [(n[0], n[1], n[2]) for n in graph[shelf_5_coord]]
+        
+        # Test path finding
+        test_path = routing_service.find_path_between_shelves(1, 5, shelves, connections, connection_points)
+        
+        return {
+            "num_shelves": len(shelves),
+            "num_connections": len(connections),
+            "num_connection_points": len(connection_points),
+            "num_graph_nodes": len(graph),
+            "horizontal_corridors": list(horizontal),
+            "vertical_corridors": list(vertical),
+            "corridors_with_cps": list(corridor_id_to_cps.keys()),
+            "shelf_1_corridor": shelf_1_corr,
+            "shelf_5_corridor": shelf_5_corr,
+            "shelf_1_centroid": shelf_1_coord,
+            "shelf_5_centroid": shelf_5_coord,
+            "shelf_1_neighbors": shelf_1_neighbors,
+            "shelf_5_neighbors": shelf_5_neighbors,
+            "path_found": test_path is not None,
+            "path_distance": test_path["total_distance"] if test_path else None,
+        }
+    except Exception as e:
+        import traceback
+        raise HTTPException(status_code=500, detail=str(e) + "\n" + traceback.format_exc())

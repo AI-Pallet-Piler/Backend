@@ -13,6 +13,11 @@ from app.db import AsyncSessionLocal, create_tables
 from app.models.models import Location, Shelf, LocationType
 
 
+def wkb_to_wkt(wkt_string: str) -> str:
+    """Convert WKT string (already in WKT format, just return it)."""
+    return wkt_string
+
+
 async def sync_locations_with_shelves():
     """Sync Location records with Shelf records based on coordinates."""
     async with AsyncSessionLocal() as session:
@@ -109,6 +114,24 @@ async def create_sample_locations():
         
         await session.commit()
         print(f"Created {location_count} locations from shelves")
+
+
+async def get_shelves_with_wkt():
+    """Get all shelves with their coordinates as WKT."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Shelf))
+        shelves = result.scalars().all()
+        
+        shelves_with_wkt = []
+        for shelf in shelves:
+            shelf_data = {
+                "shelf_id": shelf.shelf_id,
+                "name": shelf.name,
+                "coordinates_wkt": shelf.coordinates  # Already WKT in database
+            }
+            shelves_with_wkt.append(shelf_data)
+        
+        return shelves_with_wkt
 
 
 async def main():
