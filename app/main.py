@@ -15,7 +15,7 @@ from app.api.v1.endpoints.navigation import router as navigation_router
 from app.db import create_tables, get_db
 from app.services.packing_service import start_packing_service
 from app.add_initial_users import add_initial_users
-from app.add_initial_orders import create_test_data
+from app.add_initial_orders import create_test_data, setup_navigation
 
 
 @asynccontextmanager
@@ -28,6 +28,7 @@ async def lifespan(app: FastAPI):
     await start_packing_service()
     print("Packing service started!")
     await add_initial_users()
+    await setup_navigation()
     await create_test_data()
 
     yield  # Application runs while inside this block

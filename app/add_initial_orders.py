@@ -5,10 +5,12 @@ from decimal import Decimal
 import os
 from datetime import datetime, timedelta
 import time
+import shapely.wkt
+import shapely.geometry
 
 # --- IMPORTS ---
 from app.models.models import Order, OrderLine, Product, OrderStatus, Location, LocationType, Inventory
-from app.db import engine
+from app.db import engine, AsyncSessionLocal
 
 
 async def trigger_packing_for_orders(order_ids: list[int]):
@@ -164,27 +166,18 @@ async def create_test_data():
                     location = session.exec(select(Location).where(Location.location_code == location_code)).first()
                     
                     if not location:
-                        # Calculate coordinates based on rack number for warehouse layout
-                        x_coord = Decimal(str((i - 1) * 5))  # 5 units apart
-                        y_coord = Decimal("0")
-                        z_coord = Decimal("0")
-                        
-                        location = Location(
-                            location_code=location_code,
-                            aisle="A",
-                            rack=rack_num,
-                            level=1,
-                            bin=1,
-                            x_coordinate=x_coord,
-                            y_coordinate=y_coord,
-                            z_coordinate=z_coord,
-                            max_weight_kg=Decimal("500"),
-                            max_height_cm=Decimal("150"),
-                            location_type=LocationType.PICKING,
-                            is_active=True
+                        # Find existing shelf-based location
+                        location_result = session.exec(
+                            select(Location).where(Location.shelf_id.isnot(None)).limit(1)
                         )
-                        session.add(location)
-                        print(f"   ✓ {location_code} (PICKING) - {product.name}")
+                        location = location_result.first()
+                        
+                        if not location:
+                            raise Exception("No shelf-based locations found. Generate warehouse map first.")
+                    
+                    # Verify location is linked to a shelf
+                    if not location.shelf_id:
+                        raise Exception(f"Location {location_code} is not linked to a shelf. Generate warehouse map first.")
                     
                     db_locations.append(location)
                 
@@ -329,5 +322,116 @@ async def create_test_data():
     else:
         print("⚠️  No orders found to trigger packing")
 
+
+async def setup_navigation():
+    """Setup navigation data (warehouse map) in the database."""
+    from sqlalchemy import text, select
+    from app.navigation.warehouse_generator import WarehouseGenerator
+    from app.navigation.postgis_exporter import PostGISExporter
+    from app.navigation.config import load_config
+    
+    print("\n🏭 Setting up warehouse navigation...")
+    
+    # Check if navigation data already exists
+    async with engine.begin() as conn:
+        result = await conn.execute(text("SELECT COUNT(*) FROM shelves"))
+        shelf_count = result.scalar() or 0
+        
+        if shelf_count > 0:
+            print(f"   ℹ️  Navigation data already exists ({shelf_count} shelves)")
+            return
+    
+    # Generate warehouse map
+    print("   🔧 Generating warehouse map...")
+    config = load_config()
+    generator = WarehouseGenerator(config)
+    warehouse_map = generator.generate()
+    
+    # Export to database
+    print("   💾 Saving to database...")
+    
+    async with AsyncSessionLocal() as session:
+        exporter = PostGISExporter(session)
+        await exporter.clear_all()
+        await exporter.export(warehouse_map)
+    
+    stats = generator.get_statistics(warehouse_map)
+    print(f"   ✅ Warehouse map created:")
+    print(f"      - {stats['num_corridors']} corridors")
+    print(f"      - {stats['num_shelves']} shelves")
+    print(f"      - {stats['num_connections']} connections")
+    print(f"      - {stats['num_connection_points']} connection points")
+    
+    # Generate all paths
+    print("   🛤️  Generating paths between all shelves...")
+    from app.models.models import Shelf, Connection, ConnectionPoint, ShelfPath
+    from app.navigation.routing import generate_all_paths
+    
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Shelf))
+        shelves = result.scalars().all()
+        
+        result = await session.execute(select(Connection))
+        connections = result.scalars().all()
+        
+        result = await session.execute(select(ConnectionPoint))
+        connection_points = result.scalars().all()
+        
+        paths = generate_all_paths(shelves, connections, connection_points)
+        
+        # Save paths
+        for path_data in paths:
+            shelf_path = ShelfPath(
+                from_shelf_id=path_data["from_shelf_id"],
+                to_shelf_id=path_data["to_shelf_id"],
+                total_distance=path_data["total_distance"],
+                path_coordinates=path_data["path_coordinates"],
+                num_segments=path_data["num_segments"]
+            )
+            session.add(shelf_path)
+        
+        await session.commit()
+    
+    # Create locations from shelves
+    print("   📍 Creating locations from shelves...")
+    from app.models.models import Location, LocationType
+    import shapely.wkt
+    
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Shelf))
+        shelves = result.scalars().all()
+        
+        for shelf in shelves:
+            if shelf.coordinates is None:
+                continue
+            
+            shelf_geom = shapely.wkt.loads(shelf.coordinates)
+            centroid = shelf_geom.centroid
+            
+            # Check if location already exists
+            result = await session.execute(
+                select(Location).where(Location.location_code == f"LOC-{shelf.shelf_id:03d}")
+            )
+            existing = result.scalar_one_or_none()
+            
+            if not existing:
+                location = Location(
+                    location_code=f"LOC-{shelf.shelf_id:03d}",
+                    shelf_id=shelf.shelf_id,
+                    x_coordinate=centroid.x,
+                    y_coordinate=centroid.y,
+                    z_coordinate=0,
+                    location_type=LocationType.PICKING,
+                    is_active=True
+                )
+                session.add(location)
+        
+        await session.commit()
+    
+    print("   ✅ Navigation setup complete!")
+    
+    print(f"   ✅ Generated {len(paths)} paths")
+
 if __name__ == "__main__":
+    asyncio.run(setup_navigation())
     asyncio.run(create_test_data())
