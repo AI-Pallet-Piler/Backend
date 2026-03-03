@@ -19,6 +19,11 @@ from app.models import (
     PalletItem,
     StackingRule,
     PickTask,
+    Corridor,
+    Shelf,
+    Connection,
+    ConnectionPoint,
+    ShelfPath,
     Report,
 )
 
@@ -57,6 +62,9 @@ async def get_db():
 async def create_tables():
     """Create all database tables from SQLModel models."""
     async with engine.begin() as conn:
+        # Enable PostGIS and pgrouting extensions
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis;"))
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pgrouting;"))
         # Run the sync create_all in the async context
         await conn.run_sync(lambda sync_conn: SQLModel.metadata.create_all(bind=sync_conn))
         # Add completed_at column to orders if it doesn't exist yet (safe migration)

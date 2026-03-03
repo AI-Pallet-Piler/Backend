@@ -147,7 +147,7 @@ async def create_product(
     
     # Create inventory entry if initial_quantity > 0
     if initial_quantity > 0:
-        # Get or create default location
+        # Get or create default location (must be linked to a shelf)
         if location_code:
             # Try to find location by code
             location_result = await db.execute(
@@ -156,32 +156,29 @@ async def create_product(
             location = location_result.scalar_one_or_none()
             
             if not location:
-                # Create location if it doesn't exist
-                location = Location(
-                    location_code=location_code,
-                    location_type="picking",
-                    is_active=True
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Location {location_code} not found. Generate warehouse map first."
                 )
-                db.add(location)
-                await db.commit()
-                await db.refresh(location)
+            
+            # Verify location is linked to a shelf
+            if not location.shelf_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Location {location_code} is not linked to a shelf. Generate warehouse map first."
+                )
         else:
-            # Use or create a default location
-            default_location_code = "DEFAULT-01"
+            # Find any existing location that is linked to a shelf
             location_result = await db.execute(
-                select(Location).where(Location.location_code == default_location_code)
+                select(Location).where(Location.shelf_id.isnot(None)).limit(1)
             )
             location = location_result.scalar_one_or_none()
             
             if not location:
-                location = Location(
-                    location_code=default_location_code,
-                    location_type="picking",
-                    is_active=True
+                raise HTTPException(
+                    status_code=400,
+                    detail="No shelf-based locations found. Generate warehouse map first."                
                 )
-                db.add(location)
-                await db.commit()
-                await db.refresh(location)
         
         # Create inventory record
         inventory = Inventory(

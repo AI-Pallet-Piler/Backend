@@ -12,10 +12,11 @@ from app.api.v1.endpoints.products import router as products_router
 from app.api.v1.endpoints.reports import router as reports_router
 from app.api.v1.endpoints.users import router as users_router
 from app.api.v1.endpoints.user_service_users import router as user_service_users_router
+from app.api.v1.endpoints.navigation import router as navigation_router
 from app.db import create_tables, get_db
 from app.services.packing_service import start_packing_service
 from app.add_initial_users import add_initial_users
-from app.add_initial_orders import create_test_data
+from app.add_initial_orders import create_test_data, setup_navigation
 
 
 @asynccontextmanager
@@ -28,6 +29,7 @@ async def lifespan(app: FastAPI):
     await start_packing_service()
     print("Packing service started!")
     await add_initial_users()
+    await setup_navigation()
     await create_test_data()
 
     yield  # Application runs while inside this block
@@ -63,6 +65,9 @@ app.include_router(orders_router, prefix="/api/v1")
 app.include_router(products_router, prefix="/api/v1")
 app.include_router(reports_router, prefix="/api/v1")
 app.include_router(users_router, prefix="/api/v1")
+app.include_router(navigation_router, prefix="/api/v1")
+# app.include_router(auth_router, prefix="/api")
+# app.include_router(user_service_users_router, prefix="/api")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(user_service_users_router, prefix="/api/v1")
 
