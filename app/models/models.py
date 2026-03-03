@@ -33,6 +33,7 @@ class LocationType(str, PyEnum):
 
 class OrderStatus(str, PyEnum):
     NEW = "new"
+    READY = "ready"
     PICKING = "picking"
     PACKING = "packing"
     SHIPPED = "shipped"
@@ -54,6 +55,13 @@ class PickTaskStatus(str, PyEnum):
     PENDING = "pending"
     PICKED = "picked"
     COMPLETED = "completed"
+
+
+class IssueType(str, PyEnum):
+    DAMAGE = "damage"
+    MISSING = "missing"
+    BLOCKED = "blocked"
+    OTHER = "other"
 
 
 # Models
@@ -136,6 +144,7 @@ class Order(SQLModel, table=True):
     status: OrderStatus = Field(default=OrderStatus.NEW, sa_column=Column(Enum(OrderStatus)))
     priority: int = Field(default=1)
     created_at: datetime = Field(default_factory=utc_now, sa_column=Column(TIMESTAMP))
+    completed_at: Optional[datetime] = Field(default=None, sa_column=Column(TIMESTAMP))
     promised_ship_date: Optional[datetime] = Field(default=None, sa_column=Column(TIMESTAMP))
 
 
@@ -296,3 +305,20 @@ class ShelfPath(SQLModel, table=True):
     __table_args__ = (
         Index("idx_shelf_path_from_to", "from_shelf_id", "to_shelf_id", unique=True),
     )
+class Report(SQLModel, table=True):
+    __tablename__ = "reports"
+    
+    report_id: Optional[int] = Field(default=None, primary_key=True)
+    order_id: int = Field(foreign_key="orders.order_id", index=True)
+    order_number: Optional[str] = Field(default=None, max_length=50)
+    task_id: Optional[int] = Field(default=None, foreign_key="pick_tasks.task_id")
+    task_location: Optional[str] = Field(default=None, max_length=50)
+    task_sku: Optional[str] = Field(default=None, max_length=50)
+    issue_type: IssueType = Field(sa_column=Column(Enum(IssueType)))
+    message: str = Field(max_length=1000)
+    created_at: datetime = Field(default_factory=utc_now, sa_column=Column(TIMESTAMP))
+    
+    __table_args__ = (
+        Index("idx_report_order", "order_id", "created_at"),
+    )
+

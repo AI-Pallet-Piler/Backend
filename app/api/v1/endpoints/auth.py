@@ -22,6 +22,7 @@ class UserServiceResponse(BaseModel):
     id: str
     email: str
     role: str
+    badge_number: Optional[str] = None
     hashed_password: Optional[str] = None
 
 
@@ -46,5 +47,5 @@ async def validate_credentials(
         id=str(user.user_id),
         email=user.email,
         role=_role_value(user.role),
-        hashed_password=user.hashed_password,
+        badge_number=user.badge_number,
     )

@@ -16,6 +16,7 @@ class UserServiceResponse(BaseModel):
     id: str
     email: str
     role: str
+    badge_number: Optional[str] = None
     hashed_password: Optional[str] = None
 
 
@@ -36,7 +37,7 @@ async def get_user_by_id(
         id=str(user.user_id),
         email=user.email,
         role=_role_value(user.role),
-        hashed_password=user.hashed_password,
+        badge_number=user.badge_number,
     )
 
 
@@ -53,5 +54,5 @@ async def get_user_by_email(
         id=str(user.user_id),
         email=user.email,
         role=_role_value(user.role),
-        hashed_password=user.hashed_password,
+        badge_number=user.badge_number,
     )
