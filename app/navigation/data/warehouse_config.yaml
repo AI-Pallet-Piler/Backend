@@ -1,5 +1,5 @@
 # Warehouse Map Configuration
-# Demo warehouse config
+# Multi-aisle warehouse: 4 vertical hallways (A-D) connected by 3 horizontal cross-aisles
 
 warehouse:
   name: "Demo Warehouse"
@@ -8,14 +8,14 @@ warehouse:
 
 corridors:
   width: 1.5
-  horizontal_count: 2
-  vertical_count: 2
+  horizontal_count: 3
+  vertical_count: 4
   spacing: 10
-  offset_x: 2
+  offset_x: 5
   offset_y: 2
-  disable_horizontal_shelves: false
+  disable_horizontal_shelves: true
   disable_vertical_shelves: false
-  horizontal_spacing: 0
+  horizontal_spacing: [0, 13, 13]
   vertical_spacing: 0
 
 shelves:
