@@ -9,7 +9,7 @@ from sqlmodel import select
 
 from app.db import get_db
 from app.models import Product
-from app.models.models import Inventory, Location
+from app.models.models import Inventory, Location, OrderLine, PalletItem, PickTask, StackingRule, Report
 from sqlmodel import SQLModel
 
 
@@ -264,14 +264,40 @@ async def delete_product(
             detail="Product not found",
         )
 
-    # Delete related inventory records first
-    inventory_stmt = select(Inventory).where(Inventory.product_id == product_id)
-    inventory_result = await db.execute(inventory_stmt)
-    inventory_records = inventory_result.scalars().all()
-    
-    for inventory in inventory_records:
-        await db.delete(inventory)
-    
+    # Delete related records that reference this product (FK constraints)
+    # Order matters: delete dependent records first
+
+    # 1. Nullify Report.task_id for any PickTasks we're about to delete
+    pick_task_stmt = select(PickTask.task_id).where(PickTask.product_id == product_id)
+    pick_task_result = await db.execute(pick_task_stmt)
+    task_ids = [row[0] for row in pick_task_result.all()]
+    if task_ids:
+        report_stmt = select(Report).where(Report.task_id.in_(task_ids))
+        report_result = await db.execute(report_stmt)
+        for report in report_result.scalars().all():
+            report.task_id = None
+
+    # 2. Delete records that directly reference this product
+    for model, fk_field in [
+        (PalletItem, PalletItem.product_id),
+        (PickTask, PickTask.product_id),
+        (OrderLine, OrderLine.product_id),
+        (Inventory, Inventory.product_id),
+    ]:
+        related_stmt = select(model).where(fk_field == product_id)
+        related_result = await db.execute(related_stmt)
+        for record in related_result.scalars().all():
+            await db.delete(record)
+
+    # Delete stacking rules (has two FK columns referencing products)
+    stacking_stmt = select(StackingRule).where(
+        (StackingRule.product_id_top == product_id)
+        | (StackingRule.product_id_bottom == product_id)
+    )
+    stacking_result = await db.execute(stacking_stmt)
+    for rule in stacking_result.scalars().all():
+        await db.delete(rule)
+
     # Now delete the product
     await db.delete(product)
     await db.commit()
