@@ -192,27 +192,54 @@ async def generate_and_sync(
         existing_locations = result.scalars().all()
         
         if not existing_locations:
-            # Get all shelves
+            # Get all shelves and corridors for aisle-based code assignment
             result = await db.execute(select(Shelf))
             shelves = result.scalars().all()
             
+            result = await db.execute(select(Corridor))
+            corridors_list = result.scalars().all()
+            
+            # Find vertical corridor x-positions to determine aisles
+            v_positions = []
+            for c in corridors_list:
+                if c.coordinates:
+                    geom = shapely.wkt.loads(c.coordinates)
+                    coords = list(geom.coords)
+                    x_vals = [p[0] for p in coords]
+                    if max(x_vals) - min(x_vals) < 0.1:
+                        v_positions.append(x_vals[0])
+            v_positions.sort()
+            
+            # Group shelves by nearest vertical corridor (= aisle)
+            from collections import defaultdict
+            aisle_map = defaultdict(list)
             for shelf in shelves:
-                if shelf.coordinates is None:
+                if not shelf.coordinates:
                     continue
-                
-                shelf_geom = shapely.wkt.loads(shelf.coordinates)
-                centroid = shelf_geom.centroid
-                
-                location = Location(
-                    location_code=f"LOC-{shelf.shelf_id:03d}",
-                    shelf_id=shelf.shelf_id,
-                    x_coordinate=centroid.x,
-                    y_coordinate=centroid.y,
-                    z_coordinate=0,
-                    location_type=LocationType.PICKING,
-                    is_active=True
-                )
-                db.add(location)
+                geom = shapely.wkt.loads(shelf.coordinates)
+                centroid = geom.centroid
+                if v_positions:
+                    nearest_v = min(v_positions, key=lambda vx: abs(vx - centroid.x))
+                    aisle_map[nearest_v].append((shelf, centroid))
+                else:
+                    aisle_map[0].append((shelf, centroid))
+            
+            # Assign aisle-based location codes (A-01-01, B-02-01, etc.)
+            for aisle_idx, v_x in enumerate(sorted(aisle_map.keys())):
+                aisle_letter = chr(ord('A') + aisle_idx)
+                items = sorted(aisle_map[v_x], key=lambda s: (s[1].y, s[1].x))
+                for rack_idx, (shelf, centroid) in enumerate(items, start=1):
+                    code = f"{aisle_letter}-{rack_idx:02d}-01"
+                    location = Location(
+                        location_code=code,
+                        shelf_id=shelf.shelf_id,
+                        x_coordinate=centroid.x,
+                        y_coordinate=centroid.y,
+                        z_coordinate=0,
+                        location_type=LocationType.PICKING,
+                        is_active=True
+                    )
+                    db.add(location)
             
             await db.commit()
             message = "Warehouse map generated and locations created from shelves"

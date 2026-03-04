@@ -1,5 +1,6 @@
 import asyncio
 import httpx
+from sqlalchemy import text
 from sqlmodel import Session, select
 from decimal import Decimal
 import os
@@ -9,7 +10,7 @@ import shapely.wkt
 import shapely.geometry
 
 # --- IMPORTS ---
-from app.models.models import Order, OrderLine, Product, OrderStatus, Location, LocationType, Inventory
+from app.models.models import Order, OrderLine, Product, OrderStatus, Location, LocationType, Inventory, Report
 from app.db import engine, AsyncSessionLocal
 
 
@@ -78,13 +79,20 @@ async def create_test_data():
                 for order_num in ["ORD-TEST-001", "ORD-TEST-002", "ORD-TEST-003", "ORD-TEST-004"]:
                     existing_order = session.exec(select(Order).where(Order.order_number == order_num)).first()
                     if existing_order:
-                        # Delete order lines first
-                        lines = session.exec(select(OrderLine).where(OrderLine.order_id == existing_order.order_id)).all()
-                        for line in lines: 
-                            session.delete(line)
-                        session.flush()  # Flush order line deletions before deleting order
-                        # Now delete the order
-                        session.delete(existing_order)
+                        oid = existing_order.order_id
+                        # Use raw SQL deletes in correct FK order — no autoflush issues
+                        sync_conn.execute(
+                            text("DELETE FROM reports WHERE order_id = :oid"),
+                            {"oid": oid},
+                        )
+                        sync_conn.execute(
+                            text("DELETE FROM order_lines WHERE order_id = :oid"),
+                            {"oid": oid},
+                        )
+                        sync_conn.execute(
+                            text("DELETE FROM orders WHERE order_id = :oid"),
+                            {"oid": oid},
+                        )
                 session.commit()
 
                 print("📦 Creating Products (Standard Box Sizes)...")
@@ -155,31 +163,22 @@ async def create_test_data():
                 for p in db_products:
                     print(f"   {p.sku}: {p.weight_kg}kg - {p.name}")
 
-                print("\n📍 Creating Storage Locations (one per product)...")
+                print("\n📍 Assigning products to storage locations...")
+                
+                # Get all shelf-based locations, ordered by code
+                all_shelf_locations = session.exec(
+                    select(Location).where(Location.shelf_id.isnot(None))
+                    .order_by(Location.location_code)
+                ).all()
+                
+                if not all_shelf_locations:
+                    raise Exception("No shelf-based locations found. Generate warehouse map first.")
                 
                 db_locations = []
-                for i, product in enumerate(db_products, start=1):
-                    # Generate location code: A-01-01, A-02-01, A-03-01, etc.
-                    rack_num = f"{i:02d}"  # Format as 01, 02, 03, etc.
-                    location_code = f"A-{rack_num}-01"
-                    
-                    location = session.exec(select(Location).where(Location.location_code == location_code)).first()
-                    
-                    if not location:
-                        # Find existing shelf-based location
-                        location_result = session.exec(
-                            select(Location).where(Location.shelf_id.isnot(None)).limit(1)
-                        )
-                        location = location_result.first()
-                        
-                        if not location:
-                            raise Exception("No shelf-based locations found. Generate warehouse map first.")
-                    
-                    # Verify location is linked to a shelf
-                    if not location.shelf_id:
-                        raise Exception(f"Location {location_code} is not linked to a shelf. Generate warehouse map first.")
-                    
+                for i, product in enumerate(db_products):
+                    location = all_shelf_locations[i % len(all_shelf_locations)]
                     db_locations.append(location)
+                    print(f"   📍 {product.name} -> {location.location_code}")
                 
                 session.flush()
 
@@ -392,31 +391,51 @@ async def setup_navigation():
         
         await session.commit()
     
-    # Create locations from shelves
+    # Create locations from shelves with aisle-based codes (A-01-01, B-02-01, etc.)
     print("   📍 Creating locations from shelves...")
-    from app.models.models import Location, LocationType
+    from app.models.models import Location, LocationType, Corridor
     import shapely.wkt
+    from collections import defaultdict
     
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(Shelf))
         shelves = result.scalars().all()
         
+        # Get vertical corridor x-positions to determine aisles
+        result = await session.execute(select(Corridor))
+        corridors_db = result.scalars().all()
+        
+        v_positions = []
+        for c in corridors_db:
+            if c.coordinates:
+                geom = shapely.wkt.loads(c.coordinates)
+                coords = list(geom.coords)
+                x_vals = [p[0] for p in coords]
+                if max(x_vals) - min(x_vals) < 0.1:  # vertical corridor
+                    v_positions.append(x_vals[0])
+        v_positions.sort()
+        
+        # Group shelves by nearest vertical corridor (= aisle)
+        aisle_map = defaultdict(list)
         for shelf in shelves:
-            if shelf.coordinates is None:
+            if not shelf.coordinates:
                 continue
-            
-            shelf_geom = shapely.wkt.loads(shelf.coordinates)
-            centroid = shelf_geom.centroid
-            
-            # Check if location already exists
-            result = await session.execute(
-                select(Location).where(Location.location_code == f"LOC-{shelf.shelf_id:03d}")
-            )
-            existing = result.scalar_one_or_none()
-            
-            if not existing:
+            geom = shapely.wkt.loads(shelf.coordinates)
+            centroid = geom.centroid
+            if v_positions:
+                nearest_v = min(v_positions, key=lambda vx: abs(vx - centroid.x))
+                aisle_map[nearest_v].append((shelf, centroid))
+            else:
+                aisle_map[0].append((shelf, centroid))
+        
+        # Assign aisle-based location codes
+        for aisle_idx, v_x in enumerate(sorted(aisle_map.keys())):
+            aisle_letter = chr(ord('A') + aisle_idx)
+            items = sorted(aisle_map[v_x], key=lambda s: (s[1].y, s[1].x))
+            for rack_idx, (shelf, centroid) in enumerate(items, start=1):
+                code = f"{aisle_letter}-{rack_idx:02d}-01"
                 location = Location(
-                    location_code=f"LOC-{shelf.shelf_id:03d}",
+                    location_code=code,
                     shelf_id=shelf.shelf_id,
                     x_coordinate=centroid.x,
                     y_coordinate=centroid.y,
@@ -425,6 +444,7 @@ async def setup_navigation():
                     is_active=True
                 )
                 session.add(location)
+                print(f"      {code} -> Shelf {shelf.shelf_id}")
         
         await session.commit()
     
