@@ -3,8 +3,9 @@ from decimal import Decimal
 from typing import Optional
 from enum import Enum as PyEnum
 
-from sqlmodel import Field, SQLModel, Column, Index
+from sqlmodel import Field, SQLModel, Column, Index, Relationship
 from sqlalchemy import Enum, DECIMAL, TIMESTAMP, func
+from sqlalchemy.dialects.postgresql import BYTEA, TEXT
 
 
 # Helper function for UTC timestamp default
@@ -32,6 +33,7 @@ class LocationType(str, PyEnum):
 
 class OrderStatus(str, PyEnum):
     NEW = "new"
+    READY = "ready"
     PICKING = "picking"
     PACKING = "packing"
     SHIPPED = "shipped"
@@ -53,6 +55,13 @@ class PickTaskStatus(str, PyEnum):
     PENDING = "pending"
     PICKED = "picked"
     COMPLETED = "completed"
+
+
+class IssueType(str, PyEnum):
+    DAMAGE = "damage"
+    MISSING = "missing"
+    BLOCKED = "blocked"
+    OTHER = "other"
 
 
 # Models
@@ -96,6 +105,7 @@ class Location(SQLModel, table=True):
     
     location_id: Optional[int] = Field(default=None, primary_key=True)
     location_code: str = Field(max_length=20, unique=True)
+    shelf_id: Optional[int] = Field(default=None, foreign_key="shelves.shelf_id", nullable=True)
     aisle: Optional[str] = Field(default=None, max_length=10)
     rack: Optional[str] = Field(default=None, max_length=10)
     level: Optional[int] = None
@@ -107,6 +117,9 @@ class Location(SQLModel, table=True):
     max_height_cm: Decimal = Field(default=Decimal("200"), sa_column=Column(DECIMAL(8, 2)))
     location_type: LocationType = Field(default=LocationType.PICKING, sa_column=Column(Enum(LocationType)))
     is_active: bool = Field(default=True)
+    
+    # Relationship to Shelf
+    shelf: Optional["Shelf"] = Relationship(back_populates="locations")
 
 
 class Inventory(SQLModel, table=True):
@@ -131,6 +144,7 @@ class Order(SQLModel, table=True):
     status: OrderStatus = Field(default=OrderStatus.NEW, sa_column=Column(Enum(OrderStatus)))
     priority: int = Field(default=1)
     created_at: datetime = Field(default_factory=utc_now, sa_column=Column(TIMESTAMP))
+    completed_at: Optional[datetime] = Field(default=None, sa_column=Column(TIMESTAMP))
     promised_ship_date: Optional[datetime] = Field(default=None, sa_column=Column(TIMESTAMP))
 
 
@@ -211,3 +225,100 @@ class PickTask(SQLModel, table=True):
     __table_args__ = (
         Index("idx_pick_task_order_sequence", "order_id", "sequence_number"),
     )
+
+
+# ============================================================
+# Navigation Models (Warehouse Map)
+# ============================================================
+
+class Corridor(SQLModel, table=True):
+    """Represents a corridor in the warehouse (aisle/pathway)."""
+    __tablename__ = "corridors"
+    
+    corridor_id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(max_length=255)
+    coordinates: Optional[str] = Field(default=None, sa_column=Column(TEXT))  # PostGIS geometry (WKT)
+    created_at: datetime = Field(default_factory=utc_now, sa_column=Column(TIMESTAMP))
+    
+    # Relationships
+    connections: list["Connection"] = Relationship(back_populates="corridor_obj")
+    connection_points: list["ConnectionPoint"] = Relationship(back_populates="corridor_obj")
+
+
+class Shelf(SQLModel, table=True):
+    """Represents a shelf in the warehouse."""
+    __tablename__ = "shelves"
+    
+    shelf_id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(max_length=255)
+    coordinates: Optional[str] = Field(default=None, sa_column=Column(TEXT))  # PostGIS geometry (WKT)
+    created_at: datetime = Field(default_factory=utc_now, sa_column=Column(TIMESTAMP))
+    
+    # Relationships
+    connections: list["Connection"] = Relationship(back_populates="shelf_obj")
+    locations: list["Location"] = Relationship(back_populates="shelf")
+
+
+class ConnectionPoint(SQLModel, table=True):
+    """Represents the connection point where shelf meets corridor."""
+    __tablename__ = "connection_points"
+    
+    point_id: Optional[int] = Field(default=None, primary_key=True)
+    connection_point_id: int
+    corridor_id: Optional[int] = Field(default=None, foreign_key="corridors.corridor_id")
+    connection_point_coordinates: Optional[str] = Field(default=None, sa_column=Column(TEXT))  # PostGIS geometry (WKT)
+    created_at: datetime = Field(default_factory=utc_now, sa_column=Column(TIMESTAMP))
+    
+    # Relationships
+    corridor_obj: "Corridor" = Relationship(back_populates="connection_points")
+
+
+class Connection(SQLModel, table=True):
+    """Represents the connection from shelf to corridor."""
+    __tablename__ = "connections"
+    
+    connection_id: Optional[int] = Field(default=None, primary_key=True)
+    shelf_id: Optional[int] = Field(default=None, foreign_key="shelves.shelf_id")
+    corridor_id: Optional[int] = Field(default=None, foreign_key="corridors.corridor_id")
+    connection_point_id: Optional[int] = Field(default=None)
+    connection_coordinates: Optional[str] = Field(default=None, sa_column=Column(TEXT))  # PostGIS geometry (WKT)
+    created_at: datetime = Field(default_factory=utc_now, sa_column=Column(TIMESTAMP))
+    
+    # Relationships
+    shelf_obj: "Shelf" = Relationship(back_populates="connections")
+    corridor_obj: "Corridor" = Relationship(back_populates="connections")
+
+
+class ShelfPath(SQLModel, table=True):
+    """Pre-calculated shortest path between two shelves."""
+    __tablename__ = "shelf_paths"
+    
+    path_id: Optional[int] = Field(default=None, primary_key=True)
+    from_shelf_id: int = Field(foreign_key="shelves.shelf_id")
+    to_shelf_id: int = Field(foreign_key="shelves.shelf_id")
+    total_distance: float  # Total path distance
+    path_coordinates: Optional[str] = Field(default=None, sa_column=Column(TEXT))  # WKT of the path linestring
+    num_segments: int  # Number of path segments
+    created_at: datetime = Field(default_factory=utc_now, sa_column=Column(TIMESTAMP))
+    
+    # Composite unique index for from/to shelf combination
+    __table_args__ = (
+        Index("idx_shelf_path_from_to", "from_shelf_id", "to_shelf_id", unique=True),
+    )
+class Report(SQLModel, table=True):
+    __tablename__ = "reports"
+    
+    report_id: Optional[int] = Field(default=None, primary_key=True)
+    order_id: int = Field(foreign_key="orders.order_id", index=True)
+    order_number: Optional[str] = Field(default=None, max_length=50)
+    task_id: Optional[int] = Field(default=None, foreign_key="pick_tasks.task_id")
+    task_location: Optional[str] = Field(default=None, max_length=50)
+    task_sku: Optional[str] = Field(default=None, max_length=50)
+    issue_type: IssueType = Field(sa_column=Column(Enum(IssueType)))
+    message: str = Field(max_length=1000)
+    created_at: datetime = Field(default_factory=utc_now, sa_column=Column(TIMESTAMP))
+    
+    __table_args__ = (
+        Index("idx_report_order", "order_id", "created_at"),
+    )
+

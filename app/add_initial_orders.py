@@ -1,14 +1,17 @@
 import asyncio
 import httpx
+from sqlalchemy import text
 from sqlmodel import Session, select
 from decimal import Decimal
 import os
 from datetime import datetime, timedelta
 import time
+import shapely.wkt
+import shapely.geometry
 
 # --- IMPORTS ---
-from app.models.models import Order, OrderLine, Product, OrderStatus, Location, LocationType, Inventory
-from app.db import engine
+from app.models.models import Order, OrderLine, Product, OrderStatus, Location, LocationType, Inventory, Report
+from app.db import engine, AsyncSessionLocal
 
 
 async def trigger_packing_for_orders(order_ids: list[int]):
@@ -17,7 +20,33 @@ async def trigger_packing_for_orders(order_ids: list[int]):
     
     Args:
         order_ids: List of order IDs to process
+    
+    Note: During container startup, use direct call instead of HTTP to avoid
+    connection issues when the server isn't fully ready yet.
     """
+    # Check if we should use direct call (for Docker startup) or HTTP API
+    use_direct = os.getenv("USE_DIRECT_PACKING", "true").lower() == "true"
+    
+    if use_direct:
+        # Direct import to avoid circular imports
+        from app.algorithms.PalletPiler.piler_adapter import process_single_order
+        from app.db import get_db
+        
+        async for db in get_db():
+            for order_id in order_ids:
+                try:
+                    print(f"   🔄 Processing order ID {order_id} directly...")
+                    result = await process_single_order(order_id, db)
+                    if result:
+                        print(f"   ✅ Order {order_id} packed successfully")
+                    else:
+                        print(f"   ⚠️  Order {order_id} packing failed")
+                except Exception as e:
+                    print(f"   ❌ Error processing order {order_id}: {str(e)}")
+            break
+        return
+    
+    # Use HTTP API call
     # Use API Gateway - use service name when inside Docker, localhost when running on host
     # Check if we're inside Docker by looking for Docker environment indicators
     api_url = os.getenv("API_URL", "http://api-gateway:8080" if os.path.exists("/.dockerenv") else "http://localhost:8080")
@@ -50,13 +79,20 @@ async def create_test_data():
                 for order_num in ["ORD-TEST-001", "ORD-TEST-002", "ORD-TEST-003", "ORD-TEST-004"]:
                     existing_order = session.exec(select(Order).where(Order.order_number == order_num)).first()
                     if existing_order:
-                        # Delete order lines first
-                        lines = session.exec(select(OrderLine).where(OrderLine.order_id == existing_order.order_id)).all()
-                        for line in lines: 
-                            session.delete(line)
-                        session.flush()  # Flush order line deletions before deleting order
-                        # Now delete the order
-                        session.delete(existing_order)
+                        oid = existing_order.order_id
+                        # Use raw SQL deletes in correct FK order — no autoflush issues
+                        sync_conn.execute(
+                            text("DELETE FROM reports WHERE order_id = :oid"),
+                            {"oid": oid},
+                        )
+                        sync_conn.execute(
+                            text("DELETE FROM order_lines WHERE order_id = :oid"),
+                            {"oid": oid},
+                        )
+                        sync_conn.execute(
+                            text("DELETE FROM orders WHERE order_id = :oid"),
+                            {"oid": oid},
+                        )
                 session.commit()
 
                 print("📦 Creating Products (Standard Box Sizes)...")
@@ -127,40 +163,22 @@ async def create_test_data():
                 for p in db_products:
                     print(f"   {p.sku}: {p.weight_kg}kg - {p.name}")
 
-                print("\n📍 Creating Storage Locations (one per product)...")
+                print("\n📍 Assigning products to storage locations...")
+                
+                # Get all shelf-based locations, ordered by code
+                all_shelf_locations = session.exec(
+                    select(Location).where(Location.shelf_id.isnot(None))
+                    .order_by(Location.location_code)
+                ).all()
+                
+                if not all_shelf_locations:
+                    raise Exception("No shelf-based locations found. Generate warehouse map first.")
                 
                 db_locations = []
-                for i, product in enumerate(db_products, start=1):
-                    # Generate location code: A-01-01, A-02-01, A-03-01, etc.
-                    rack_num = f"{i:02d}"  # Format as 01, 02, 03, etc.
-                    location_code = f"A-{rack_num}-01"
-                    
-                    location = session.exec(select(Location).where(Location.location_code == location_code)).first()
-                    
-                    if not location:
-                        # Calculate coordinates based on rack number for warehouse layout
-                        x_coord = Decimal(str((i - 1) * 5))  # 5 units apart
-                        y_coord = Decimal("0")
-                        z_coord = Decimal("0")
-                        
-                        location = Location(
-                            location_code=location_code,
-                            aisle="A",
-                            rack=rack_num,
-                            level=1,
-                            bin=1,
-                            x_coordinate=x_coord,
-                            y_coordinate=y_coord,
-                            z_coordinate=z_coord,
-                            max_weight_kg=Decimal("500"),
-                            max_height_cm=Decimal("150"),
-                            location_type=LocationType.PICKING,
-                            is_active=True
-                        )
-                        session.add(location)
-                        print(f"   ✓ {location_code} (PICKING) - {product.name}")
-                    
+                for i, product in enumerate(db_products):
+                    location = all_shelf_locations[i % len(all_shelf_locations)]
                     db_locations.append(location)
+                    print(f"   📍 {product.name} -> {location.location_code}")
                 
                 session.flush()
 
@@ -303,5 +321,137 @@ async def create_test_data():
     else:
         print("⚠️  No orders found to trigger packing")
 
+
+async def setup_navigation():
+    """Setup navigation data (warehouse map) in the database."""
+    from sqlalchemy import text, select
+    from app.navigation.warehouse_generator import WarehouseGenerator
+    from app.navigation.postgis_exporter import PostGISExporter
+    from app.navigation.config import load_config
+    
+    print("\n🏭 Setting up warehouse navigation...")
+    
+    # Check if navigation data already exists
+    async with engine.begin() as conn:
+        result = await conn.execute(text("SELECT COUNT(*) FROM shelves"))
+        shelf_count = result.scalar() or 0
+        
+        if shelf_count > 0:
+            print(f"   ℹ️  Navigation data already exists ({shelf_count} shelves)")
+            return
+    
+    # Generate warehouse map
+    print("   🔧 Generating warehouse map...")
+    config = load_config()
+    generator = WarehouseGenerator(config)
+    warehouse_map = generator.generate()
+    
+    # Export to database
+    print("   💾 Saving to database...")
+    
+    async with AsyncSessionLocal() as session:
+        exporter = PostGISExporter(session)
+        await exporter.clear_all()
+        await exporter.export(warehouse_map)
+    
+    stats = generator.get_statistics(warehouse_map)
+    print(f"   ✅ Warehouse map created:")
+    print(f"      - {stats['num_corridors']} corridors")
+    print(f"      - {stats['num_shelves']} shelves")
+    print(f"      - {stats['num_connections']} connections")
+    print(f"      - {stats['num_connection_points']} connection points")
+    
+    # Generate all paths
+    print("   🛤️  Generating paths between all shelves...")
+    from app.models.models import Shelf, Connection, ConnectionPoint, ShelfPath
+    from app.navigation.routing import generate_all_paths
+    
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Shelf))
+        shelves = result.scalars().all()
+        
+        result = await session.execute(select(Connection))
+        connections = result.scalars().all()
+        
+        result = await session.execute(select(ConnectionPoint))
+        connection_points = result.scalars().all()
+        
+        paths = generate_all_paths(shelves, connections, connection_points)
+        
+        # Save paths
+        for path_data in paths:
+            shelf_path = ShelfPath(
+                from_shelf_id=path_data["from_shelf_id"],
+                to_shelf_id=path_data["to_shelf_id"],
+                total_distance=path_data["total_distance"],
+                path_coordinates=path_data["path_coordinates"],
+                num_segments=path_data["num_segments"]
+            )
+            session.add(shelf_path)
+        
+        await session.commit()
+    
+    # Create locations from shelves with aisle-based codes (A-01-01, B-02-01, etc.)
+    print("   📍 Creating locations from shelves...")
+    from app.models.models import Location, LocationType, Corridor
+    import shapely.wkt
+    from collections import defaultdict
+    
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Shelf))
+        shelves = result.scalars().all()
+        
+        # Get vertical corridor x-positions to determine aisles
+        result = await session.execute(select(Corridor))
+        corridors_db = result.scalars().all()
+        
+        v_positions = []
+        for c in corridors_db:
+            if c.coordinates:
+                geom = shapely.wkt.loads(c.coordinates)
+                coords = list(geom.coords)
+                x_vals = [p[0] for p in coords]
+                if max(x_vals) - min(x_vals) < 0.1:  # vertical corridor
+                    v_positions.append(x_vals[0])
+        v_positions.sort()
+        
+        # Group shelves by nearest vertical corridor (= aisle)
+        aisle_map = defaultdict(list)
+        for shelf in shelves:
+            if not shelf.coordinates:
+                continue
+            geom = shapely.wkt.loads(shelf.coordinates)
+            centroid = geom.centroid
+            if v_positions:
+                nearest_v = min(v_positions, key=lambda vx: abs(vx - centroid.x))
+                aisle_map[nearest_v].append((shelf, centroid))
+            else:
+                aisle_map[0].append((shelf, centroid))
+        
+        # Assign aisle-based location codes
+        for aisle_idx, v_x in enumerate(sorted(aisle_map.keys())):
+            aisle_letter = chr(ord('A') + aisle_idx)
+            items = sorted(aisle_map[v_x], key=lambda s: (s[1].y, s[1].x))
+            for rack_idx, (shelf, centroid) in enumerate(items, start=1):
+                code = f"{aisle_letter}-{rack_idx:02d}-01"
+                location = Location(
+                    location_code=code,
+                    shelf_id=shelf.shelf_id,
+                    x_coordinate=centroid.x,
+                    y_coordinate=centroid.y,
+                    z_coordinate=0,
+                    location_type=LocationType.PICKING,
+                    is_active=True
+                )
+                session.add(location)
+                print(f"      {code} -> Shelf {shelf.shelf_id}")
+        
+        await session.commit()
+    
+    print("   ✅ Navigation setup complete!")
+    
+    print(f"   ✅ Generated {len(paths)} paths")
+
 if __name__ == "__main__":
+    asyncio.run(setup_navigation())
     asyncio.run(create_test_data())

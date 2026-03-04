@@ -5,6 +5,7 @@ from .models import (
     PalletStatus,
     Rotation,
     PickTaskStatus,
+    IssueType,
     # Models
     User,
     Product,
@@ -17,6 +18,13 @@ from .models import (
     PalletItem,
     StackingRule,
     PickTask,
+    # Navigation Models
+    Corridor,
+    Shelf,
+    Connection,
+    ConnectionPoint,
+    ShelfPath,
+    Report,
 )
 
 __all__ = [ # = what gets imported if someone writes 'from models import *'
@@ -25,6 +33,7 @@ __all__ = [ # = what gets imported if someone writes 'from models import *'
     "PalletStatus",
     "Rotation",
     "PickTaskStatus",
+    "IssueType",
     "User",
     "Product",
     "Location",
@@ -36,4 +45,10 @@ __all__ = [ # = what gets imported if someone writes 'from models import *'
     "PalletItem",
     "StackingRule",
     "PickTask",
+    "Corridor",
+    "Shelf",
+    "Connection",
+    "ConnectionPoint",
+    "ShelfPath",
+    "Report",
 ]

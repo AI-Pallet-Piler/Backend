@@ -6,13 +6,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select, SQLModel
 
 from app.db import get_db
-from app.models.models import Inventory, Product, Location
+from app.models.models import Inventory, Product, Location, Shelf
 
 
 # Request/Response schemas
 class InventoryCreate(SQLModel):
     """Schema for creating new inventory records."""
     product_id: int
+    # location_id: int
     location_id: int
     quantity: int = 0
 
@@ -26,6 +27,7 @@ class InventoryResponse(SQLModel):
     """Enhanced inventory response with product and location details."""
     inventory_id: int
     product_id: int
+    # location_id: int
     location_id: int
     quantity: int
     

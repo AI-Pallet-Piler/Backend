@@ -1,0 +1,25 @@
+# Warehouse Map Configuration
+# Multi-aisle warehouse: 4 vertical hallways (A-D) connected by 3 horizontal cross-aisles
+
+warehouse:
+  name: "Demo Warehouse"
+  width: 40
+  height: 30
+
+corridors:
+  width: 1.5
+  horizontal_count: 3
+  vertical_count: 4
+  spacing: 10
+  offset_x: 5
+  offset_y: 2
+  disable_horizontal_shelves: true
+  disable_vertical_shelves: false
+  horizontal_spacing: [0, 13, 13]
+  vertical_spacing: 0
+
+shelves:
+  width: 2
+  height: 1
+  count_per_segment: 1
+  spacing: 4

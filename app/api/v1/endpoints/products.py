@@ -3,12 +3,13 @@ from decimal import Decimal
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.db import get_db
 from app.models import Product
-from app.models.models import Inventory, Location
+from app.models.models import Inventory, Location, OrderLine, PalletItem, PickTask, StackingRule, Report
 from sqlmodel import SQLModel
 
 
@@ -129,69 +130,75 @@ async def create_product(
     db: AsyncSession = Depends(get_db),
 ) -> Product:
     now = _naive_utc_now()
-    
-    # Extract inventory-related fields
+
+    # Extract inventory-related fields before building product
     initial_quantity = payload.initial_quantity
     location_code = payload.location_code
-    
-    # Create product (exclude inventory fields from product creation)
-    product_data = payload.model_dump(exclude={"initial_quantity", "location_code"})
-    product = Product(
-        **product_data,
-        created_at=now,
-        updated_at=now,
-    )
-    db.add(product)
-    await db.commit()
-    await db.refresh(product)
-    
-    # Create inventory entry if initial_quantity > 0
+
+    # Validate location BEFORE touching the DB when inventory is requested
+    location = None
     if initial_quantity > 0:
-        # Get or create default location
         if location_code:
-            # Try to find location by code
             location_result = await db.execute(
                 select(Location).where(Location.location_code == location_code)
             )
             location = location_result.scalar_one_or_none()
-            
             if not location:
-                # Create location if it doesn't exist
-                location = Location(
-                    location_code=location_code,
-                    location_type="picking",
-                    is_active=True
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Location '{location_code}' not found. Generate the warehouse map first.",
                 )
-                db.add(location)
-                await db.commit()
-                await db.refresh(location)
+            if not location.shelf_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Location '{location_code}' is not linked to a shelf. Generate the warehouse map first.",
+                )
         else:
-            # Use or create a default location
-            default_location_code = "DEFAULT-01"
             location_result = await db.execute(
-                select(Location).where(Location.location_code == default_location_code)
+                select(Location).where(Location.shelf_id.isnot(None)).limit(1)
             )
             location = location_result.scalar_one_or_none()
-            
             if not location:
-                location = Location(
-                    location_code=default_location_code,
-                    location_type="picking",
-                    is_active=True
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="No shelf-based locations found. Generate the warehouse map first.",
                 )
-                db.add(location)
-                await db.commit()
-                await db.refresh(location)
-        
-        # Create inventory record
+
+    # Build product object (do not commit yet)
+    product_data = payload.model_dump(exclude={"initial_quantity", "location_code"})
+    product = Product(**product_data, created_at=now, updated_at=now)
+    db.add(product)
+
+    # Flush to get product_id without committing (lets us catch duplicate SKU cleanly)
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"A product with SKU '{payload.sku}' already exists.",
+        )
+
+    # Add inventory record in the same transaction
+    if initial_quantity > 0 and location is not None:
         inventory = Inventory(
             product_id=product.product_id,
             location_id=location.location_id,
-            quantity=initial_quantity
+            quantity=initial_quantity,
         )
         db.add(inventory)
+
+    # Single commit for product + inventory together
+    try:
         await db.commit()
-    
+        await db.refresh(product)
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"A product with SKU '{payload.sku}' already exists.",
+        )
+
     return product
 
 
@@ -257,14 +264,40 @@ async def delete_product(
             detail="Product not found",
         )
 
-    # Delete related inventory records first
-    inventory_stmt = select(Inventory).where(Inventory.product_id == product_id)
-    inventory_result = await db.execute(inventory_stmt)
-    inventory_records = inventory_result.scalars().all()
-    
-    for inventory in inventory_records:
-        await db.delete(inventory)
-    
+    # Delete related records that reference this product (FK constraints)
+    # Order matters: delete dependent records first
+
+    # 1. Nullify Report.task_id for any PickTasks we're about to delete
+    pick_task_stmt = select(PickTask.task_id).where(PickTask.product_id == product_id)
+    pick_task_result = await db.execute(pick_task_stmt)
+    task_ids = [row[0] for row in pick_task_result.all()]
+    if task_ids:
+        report_stmt = select(Report).where(Report.task_id.in_(task_ids))
+        report_result = await db.execute(report_stmt)
+        for report in report_result.scalars().all():
+            report.task_id = None
+
+    # 2. Delete records that directly reference this product
+    for model, fk_field in [
+        (PalletItem, PalletItem.product_id),
+        (PickTask, PickTask.product_id),
+        (OrderLine, OrderLine.product_id),
+        (Inventory, Inventory.product_id),
+    ]:
+        related_stmt = select(model).where(fk_field == product_id)
+        related_result = await db.execute(related_stmt)
+        for record in related_result.scalars().all():
+            await db.delete(record)
+
+    # Delete stacking rules (has two FK columns referencing products)
+    stacking_stmt = select(StackingRule).where(
+        (StackingRule.product_id_top == product_id)
+        | (StackingRule.product_id_bottom == product_id)
+    )
+    stacking_result = await db.execute(stacking_stmt)
+    for rule in stacking_result.scalars().all():
+        await db.delete(rule)
+
     # Now delete the product
     await db.delete(product)
     await db.commit()
